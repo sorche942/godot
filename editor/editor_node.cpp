@@ -6789,6 +6789,15 @@ void EditorNode::_add_dropped_files_recursive(const Vector<String> &p_files, Str
 	Ref<DirAccess> dir = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
 	ERR_FAIL_COND(dir.is_null());
 
+	auto ensure_unique_directory = [&](const String &p_base) -> String {
+		String unique = p_base;
+		int suffix = 1;
+		while (dir->dir_exists(unique) || dir->file_exists(unique)) {
+			unique = vformat("%s_%d", p_base, suffix++);
+		}
+		return unique;
+	};
+
 	for (int i = 0; i < p_files.size(); i++) {
 		const String &from = p_files[i];
 		String to = to_path.path_join(from.get_file());
@@ -6820,6 +6829,17 @@ void EditorNode::_add_dropped_files_recursive(const Vector<String> &p_files, Str
 			continue;
 		}
 
+		String destination_dir = to_path;
+		if (from.get_extension().to_lower() == "glb") {
+			String folder_base = destination_dir.path_join(from.get_file().get_basename());
+			String unique_folder = ensure_unique_directory(folder_base);
+			if (dir->make_dir_recursive(unique_folder) != OK) {
+				ERR_PRINT(vformat("Failed to create folder '%s' for GLB import.", unique_folder));
+			} else {
+				destination_dir = unique_folder;
+			}
+		}
+		to = destination_dir.path_join(from.get_file());
 		dir->copy(from, to);
 	}
 }

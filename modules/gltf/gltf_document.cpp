@@ -1927,8 +1927,9 @@ Error GLTFDocument::_parse_meshes(Ref<GLTFState> p_state) {
 					mat = mat3d;
 
 				} else {
-					Ref<StandardMaterial3D> mat3d;
-					mat3d.instantiate();
+				Ref<StandardMaterial3D> mat3d;
+				mat3d.instantiate();
+				mat3d->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC);
 					if (has_vertex_color) {
 						mat3d->set_flag(StandardMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
 					}
@@ -2945,6 +2946,7 @@ Error GLTFDocument::_parse_materials(Ref<GLTFState> p_state) {
 
 		Ref<StandardMaterial3D> material;
 		material.instantiate();
+		material->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC);
 		if (material_dict.has("name") && !String(material_dict["name"]).is_empty()) {
 			material->set_name(material_dict["name"]);
 		} else {
