@@ -134,14 +134,14 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			const float EPSILON = 0.0001;
 			float scaling_3d_scale = p_viewport->scaling_3d_scale;
 			RS::ViewportScaling3DMode scaling_3d_mode = p_viewport->scaling_3d_mode;
-			bool upscaler_available = p_viewport->fsr_enabled;
+			bool upscaler_available = (scaling_3d_mode == RS::VIEWPORT_SCALING_3D_MODE_DLSS) ? p_viewport->dlss_enabled : p_viewport->fsr_enabled;
 			RS::ViewportScaling3DType scaling_type = RS::scaling_3d_mode_type(scaling_3d_mode);
 
 			if ((!upscaler_available || (scaling_type == RS::VIEWPORT_SCALING_3D_TYPE_SPATIAL)) && scaling_3d_scale >= (1.0 - EPSILON) && scaling_3d_scale <= (1.0 + EPSILON)) {
 				// No 3D scaling for spatial modes? Ignore scaling mode, this just introduces overhead.
 				// - Mobile can't perform optimal path
 				// - FSR does an extra pass (or 2 extra passes if 2D-MSAA is enabled)
-				// Scaling = 1.0 on FSR2 and MetalFX temporal has benefits
+				// Scaling = 1.0 on FSR2, DLSS and MetalFX temporal has benefits
 				scaling_3d_scale = 1.0;
 				scaling_3d_mode = RS::VIEWPORT_SCALING_3D_MODE_OFF;
 			}
@@ -149,7 +149,14 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			if (scaling_3d_mode != RS::VIEWPORT_SCALING_3D_MODE_OFF && scaling_3d_mode != RS::VIEWPORT_SCALING_3D_MODE_BILINEAR && OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
 				scaling_3d_mode = RS::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RS::scaling_3d_mode_type(scaling_3d_mode);
-				WARN_PRINT_ONCE("MetalFX and FSR upscaling are not supported in the Compatibility renderer. Falling back to bilinear scaling.");
+				WARN_PRINT_ONCE("MetalFX, FSR and DLSS upscaling are not supported in the Compatibility renderer. Falling back to bilinear scaling.");
+			}
+
+			// DLSS support check and fallback
+			if (scaling_3d_mode == RS::VIEWPORT_SCALING_3D_MODE_DLSS && !p_viewport->dlss_enabled) {
+				scaling_3d_mode = RS::VIEWPORT_SCALING_3D_MODE_FSR2;
+				scaling_type = RS::scaling_3d_mode_type(scaling_3d_mode);
+				WARN_PRINT_ONCE("DLSS is not available on this system. Falling back to FSR 2 scaling.");
 			}
 
 			if (scaling_3d_mode == RS::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL && !RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_TEMPORAL)) {
@@ -211,6 +218,14 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				use_taa = false;
 			}
 
+			if (scaling_3d_mode == RS::VIEWPORT_SCALING_3D_MODE_DLSS) {
+				const float dlss_min_scale = 0.5f;
+				if (scaling_3d_scale < dlss_min_scale) {
+					WARN_PRINT_ONCE(vformat("DLSS 3D scaling scale is below supported limits; clamping scale to %f.", dlss_min_scale));
+					scaling_3d_scale = dlss_min_scale;
+				}
+			}
+
 			int target_width;
 			int target_height;
 			int render_width;
@@ -231,8 +246,38 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				case RS::VIEWPORT_SCALING_3D_MODE_FSR2:
 					target_width = p_viewport->size.width;
 					target_height = p_viewport->size.height;
-					render_width = MAX(target_width * scaling_3d_scale, 1.0); // target_width / (target_width * scaling)
+					render_width = MAX(target_width * scaling_3d_scale, 1.0);
 					render_height = MAX(target_height * scaling_3d_scale, 1.0);
+					break;
+				case RS::VIEWPORT_SCALING_3D_MODE_DLSS:
+					// CRITICAL FIX: Use DLSS optimal resolutions instead of arbitrary scaling
+					// DLSS has specific quality modes with exact upscale ratios, not approximate scales
+					// We must use the INVERSE of DLSS's upscale ratios for the render resolution
+					// DLSS upscale ratios: DLAA=1.0x, UltraQ=1.3x, Quality=1.5x, Balanced=1.724x, Perf=2.0x, UltraPerf=3.0x
+					target_width = p_viewport->size.width;
+					target_height = p_viewport->size.height;
+
+					// Map scale to DLSS quality mode and use EXACT inverse of upscale ratio
+					float dlss_scale;
+					if (scaling_3d_scale >= 0.95f) {
+						dlss_scale = 1.0f;           // DLAA: 1.0/1.0 = 1.0x (no upscale)
+					} else if (scaling_3d_scale >= 0.80f) {
+						dlss_scale = 1.0f / 1.3f;     // Ultra Quality: 1.0/1.3 ≈ 0.769x (~1.3x upscale)
+					} else if (scaling_3d_scale >= 0.65f) {
+						dlss_scale = 1.0f / 1.5f;     // Quality: 1.0/1.5 ≈ 0.667x (1.5x upscale)
+					} else if (scaling_3d_scale >= 0.55f) {
+						dlss_scale = 1.0f / 1.724f;   // Balanced: 1.0/1.724 ≈ 0.580x (1.724x upscale) ← CRITICAL FIX!
+					} else if (scaling_3d_scale >= 0.40f) {
+						dlss_scale = 1.0f / 2.0f;     // Performance: 1.0/2.0 = 0.5x (2.0x upscale)
+					} else {
+						dlss_scale = 1.0f / 3.0f;     // Ultra Performance: 1.0/3.0 ≈ 0.333x (3.0x upscale)
+					}
+
+					render_width = MAX(target_width * dlss_scale, 1.0);
+					render_height = MAX(target_height * dlss_scale, 1.0);
+
+					print_line(vformat("DLSS: Mapped scale %.2f → %.3f, resolution: %dx%d → %dx%d",
+						scaling_3d_scale, dlss_scale, render_width, render_height, target_width, target_height));
 					break;
 				case RS::VIEWPORT_SCALING_3D_MODE_OFF:
 					target_width = p_viewport->size.width;
@@ -255,7 +300,7 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			uint32_t jitter_phase_count = 0;
 			if (scaling_type == RS::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
 				// Implementation has been copied from ffxFsr2GetJitterPhaseCount.
-				// Also used for MetalFX Temporal scaling.
+				// Also used for MetalFX Temporal scaling and DLSS.
 				jitter_phase_count = uint32_t(8.0f * std::pow(float(target_width) / render_width, 2.0f));
 			} else if (use_taa) {
 				// Default jitter count for TAA.
@@ -962,6 +1007,30 @@ void RendererViewport::viewport_initialize(RID p_rid) {
 	viewport->viewport_render_direct_to_screen = false;
 
 	viewport->fsr_enabled = !RSG::rasterizer->is_low_end() && !viewport->disable_3d;
+
+	// DLSS requires RTX hardware and is only available on certain platforms
+	// Check if DLSS is available: needs Vulkan/Forward+ renderer and non-low-end hardware
+#ifdef DLSS_ENABLED
+	bool is_vulkan = OS::get_singleton()->get_current_rendering_driver_name() == "vulkan";
+	bool is_low_end = RSG::rasterizer->is_low_end();
+	bool disable_3d = viewport->disable_3d;
+
+	print_line("=== DLSS Availability Check ===");
+	print_line("DLSS_ENABLED: YES");
+	print_line("Rendering Driver: " + OS::get_singleton()->get_current_rendering_driver_name());
+	print_line("Is Vulkan: " + String(is_vulkan ? "YES" : "NO"));
+	print_line("Is Low End: " + String(is_low_end ? "YES" : "NO"));
+	print_line("3D Disabled: " + String(disable_3d ? "YES" : "NO"));
+
+	viewport->dlss_enabled = !is_low_end && !disable_3d && is_vulkan;
+	print_line("DLSS Enabled: " + String(viewport->dlss_enabled ? "YES" : "NO"));
+	print_line("===============================");
+#else
+	print_line("=== DLSS Availability Check ===");
+	print_line("DLSS_ENABLED: NO (not compiled in)");
+	print_line("===============================");
+	viewport->dlss_enabled = false;
+#endif
 }
 
 #ifndef XR_DISABLED
@@ -987,6 +1056,12 @@ void RendererViewport::viewport_set_use_xr(RID p_viewport, bool p_use_xr) {
 void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RS::ViewportScaling3DMode p_mode) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
+
+	if (p_mode == RS::VIEWPORT_SCALING_3D_MODE_DLSS) {
+		print_line("=== DLSS Mode Set ===");
+		print_line("DLSS mode requested, dlss_enabled: " + String(viewport->dlss_enabled ? "YES" : "NO"));
+		print_line("====================");
+	}
 #ifdef DEBUG_ENABLED
 	const String rendering_method = OS::get_singleton()->get_current_rendering_method();
 	if (rendering_method != "forward_plus") {
@@ -998,6 +1073,9 @@ void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RS::Viewport
 		}
 		if (p_mode == RS::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL) {
 			WARN_PRINT_ONCE_ED("MetalFX Temporal 3D scaling is only available when using the Forward+ renderer.");
+		}
+		if (p_mode == RS::VIEWPORT_SCALING_3D_MODE_DLSS) {
+			WARN_PRINT_ONCE_ED("DLSS 3D scaling is only available when using the Forward+ renderer.");
 		}
 	}
 	if (rendering_method == "gl_compatibility" && p_mode == RS::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL) {

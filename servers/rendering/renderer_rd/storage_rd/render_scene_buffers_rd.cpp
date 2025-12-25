@@ -103,7 +103,7 @@ void RenderSceneBuffersRD::update_samplers() {
 	float computed_mipmap_bias = texture_mipmap_bias;
 
 	if (use_taa || (RS::scaling_3d_mode_type(scaling_3d_mode) == RS::VIEWPORT_SCALING_3D_TYPE_TEMPORAL)) {
-		// Use negative mipmap LOD bias when TAA or FSR2 is enabled to compensate for loss of sharpness.
+		// Use negative mipmap LOD bias when TAA, FSR2, or DLSS is enabled to compensate for loss of sharpness.
 		// This restores sharpness in still images to be roughly at the same level as without TAA,
 		// but moving scenes will still be blurrier.
 		computed_mipmap_bias -= 0.5;

@@ -68,6 +68,12 @@ Luminance::Luminance(bool p_prefer_raster_effects) {
 			luminance_reduce_raster.pipelines[i].clear();
 		}
 	}
+
+	Vector<String> exposure_scale_modes;
+	exposure_scale_modes.push_back("\n");
+	exposure_scale.shader.initialize(exposure_scale_modes);
+	exposure_scale.shader_version = exposure_scale.shader.version_create();
+	exposure_scale.pipeline = RD::get_singleton()->compute_pipeline_create(exposure_scale.shader.version_get_shader(exposure_scale.shader_version, 0));
 }
 
 Luminance::~Luminance() {
@@ -76,6 +82,7 @@ Luminance::~Luminance() {
 	} else {
 		luminance_reduce.shader.version_free(luminance_reduce.shader_version);
 	}
+	exposure_scale.shader.version_free(exposure_scale.shader_version);
 }
 
 void Luminance::LuminanceBuffers::set_prefer_raster_effects(bool p_prefer_raster_effects) {
@@ -114,6 +121,12 @@ void Luminance::LuminanceBuffers::configure(RenderSceneBuffersRD *p_render_buffe
 		if (final) {
 			current = RD::get_singleton()->texture_create(tf, RD::TextureView());
 			RD::get_singleton()->texture_clear(current, Color(0.0, 0.0, 0.0), 0u, 1u, 0u, 1u);
+			if (!prefer_raster_effects) {
+				RD::TextureFormat exposure_tf = tf;
+				exposure_tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+				exposure = RD::get_singleton()->texture_create(exposure_tf, RD::TextureView());
+				RD::get_singleton()->texture_clear(exposure, Color(1.0, 0.0, 0.0), 0u, 1u, 0u, 1u);
+			}
 			break;
 		}
 	}
@@ -128,6 +141,11 @@ void Luminance::LuminanceBuffers::free_data() {
 	if (current.is_valid()) {
 		RD::get_singleton()->free_rid(current);
 		current = RID();
+	}
+
+	if (exposure.is_valid()) {
+		RD::get_singleton()->free_rid(exposure);
+		exposure = RID();
 	}
 }
 
@@ -153,6 +171,47 @@ RID Luminance::get_current_luminance_buffer(Ref<RenderSceneBuffersRD> p_render_b
 	}
 
 	return RID();
+}
+
+RID Luminance::get_exposure_scale_buffer(Ref<RenderSceneBuffersRD> p_render_buffers) {
+	if (p_render_buffers->has_custom_data(RB_LUMINANCE_BUFFERS)) {
+		Ref<LuminanceBuffers> buffers = p_render_buffers->get_custom_data(RB_LUMINANCE_BUFFERS);
+		return buffers->exposure;
+	}
+
+	return RID();
+}
+
+void Luminance::update_exposure_scale(Ref<RenderSceneBuffersRD> p_render_buffers, float p_exposure_scale) {
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	Ref<LuminanceBuffers> buffers = get_luminance_buffers(p_render_buffers);
+	if (buffers.is_null() || !buffers->current.is_valid() || !buffers->exposure.is_valid()) {
+		return;
+	}
+
+	ExposureScalePushConstant push_constant;
+	memset(&push_constant, 0, sizeof(ExposureScalePushConstant));
+	push_constant.exposure_scale = p_exposure_scale;
+
+	RID default_sampler = material_storage->sampler_rd_get_default(RS::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RS::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RD::Uniform u_source_luminance(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, buffers->current }));
+	RD::Uniform u_dest_exposure(RD::UNIFORM_TYPE_IMAGE, 0, buffers->exposure);
+
+	RID shader = exposure_scale.shader.version_get_shader(exposure_scale.shader_version, 0);
+	ERR_FAIL_COND(shader.is_null());
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, exposure_scale.pipeline);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_source_luminance), 0);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_dest_exposure), 1);
+	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(ExposureScalePushConstant));
+	RD::get_singleton()->compute_list_dispatch(compute_list, 1, 1, 1);
+	RD::get_singleton()->compute_list_end();
 }
 
 void Luminance::luminance_reduction(RID p_source_texture, const Size2i p_source_size, Ref<LuminanceBuffers> p_luminance_buffers, float p_min_luminance, float p_max_luminance, float p_adjust, bool p_set) {

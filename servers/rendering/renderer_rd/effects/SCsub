@@ -11,11 +11,30 @@ env_effects = env.Clone()
 
 thirdparty_obj = []
 
+# FSR2
 thirdparty_dir = "#thirdparty/amd-fsr2/"
 thirdparty_sources = ["ffx_assert.cpp", "ffx_fsr2.cpp"]
 thirdparty_sources = [thirdparty_dir + file for file in thirdparty_sources]
 
 env_effects.Prepend(CPPPATH=[thirdparty_dir])
+
+# DLSS SDK (NVIDIA NGX)
+# Only include on platforms where DLSS is supported (Linux x86_64 for now)
+if env["platform"] == "linuxbsd" and env["arch"] == "x86_64":
+    dlss_dir = "#DLSS/"
+    dlss_include = dlss_dir + "include/"
+    dlss_lib_dir = dlss_dir + "lib/Linux_x86_64/"
+    dlss_lib = dlss_lib_dir + "libnvsdk_ngx.a"
+
+    # Add DLSS include path
+    env_effects.Prepend(CPPPATH=[dlss_include])
+
+    # Add DLSS library path
+    env_effects.Append(LIBPATH=[dlss_lib_dir])
+    env_effects.Append(LIBS=["nvsdk_ngx", "dl", "pthread"])
+
+    # Enable DLSS support
+    env_effects.Append(CPPDEFINES=["DLSS_ENABLED"])
 
 
 def areatex_builder(target, source, env):

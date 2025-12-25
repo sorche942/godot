@@ -563,6 +563,11 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	// can and will fill the validation layers with useless info otherwise if not enabled.
 	_register_requested_device_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, false);
 
+	// NVIDIA NGX (DLSS) required extensions - optional, only available on NVIDIA GPUs
+	_register_requested_device_extension("VK_NVX_binary_import", false);
+	_register_requested_device_extension("VK_NVX_image_view_handle", false);
+	_register_requested_device_extension("VK_KHR_push_descriptor", false);
+
 	if (Engine::get_singleton()->is_generate_spirv_debug_info_enabled()) {
 		_register_requested_device_extension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME, true);
 	}
@@ -1284,6 +1289,12 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			vkGetDeviceQueue(vk_device, i, j, &queue_families[i][j].queue);
 		}
 	}
+
+#ifdef USE_VOLK
+	// Load device-level function pointers using volk
+	// This is required for device-level Vulkan functions (e.g., vkCreateCommandPool)
+	volkLoadDevice(vk_device);
+#endif
 
 	const RenderingContextDriverVulkan::Functions &functions = context_driver->functions_get();
 	if (functions.GetDeviceProcAddr != nullptr) {

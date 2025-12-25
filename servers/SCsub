@@ -2,8 +2,15 @@
 from misc.utility.scons_hints import *
 
 Import("env")
+import os
 
 env.servers_sources = []
+
+# DLSS SDK (NVIDIA NGX) - Enable DLSS support if available
+if env["platform"] == "linuxbsd" and env["arch"] == "x86_64":
+    dlss_lib_dir = Dir("#DLSS/lib/Linux_x86_64/").abspath
+    if os.path.exists(dlss_lib_dir):
+        env.Append(CPPDEFINES=["DLSS_ENABLED"])
 
 env.add_source_files(env.servers_sources, "register_server_types.cpp")
 

@@ -60,6 +60,7 @@ public:
 		float texture_mipmap_bias = 0.0f;
 		RS::ViewportAnisotropicFiltering anisotropic_filtering_level = RenderingServer::VIEWPORT_ANISOTROPY_4X;
 		bool fsr_enabled = false;
+		bool dlss_enabled = false;
 		uint32_t jitter_phase_count = 0;
 		RS::ViewportUpdateMode update_mode = RenderingServer::VIEWPORT_UPDATE_WHEN_VISIBLE;
 		RID render_target;

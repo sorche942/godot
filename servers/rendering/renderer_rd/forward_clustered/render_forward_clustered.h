@@ -33,6 +33,7 @@
 #include "core/templates/paged_allocator.h"
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
+#include "servers/rendering/renderer_rd/effects/dlss.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
 #ifdef METAL_ENABLED
 #include "servers/rendering/renderer_rd/effects/metal_fx.h"
@@ -730,6 +731,7 @@ private:
 
 	RendererRD::TAA *taa = nullptr;
 	RendererRD::FSR2Effect *fsr2_effect = nullptr;
+	RendererRD::DLSSUpscaler *dlss_upscaler = nullptr;
 	RendererRD::SSEffects *ss_effects = nullptr;
 
 #ifdef METAL_MFXTEMPORAL_ENABLED

@@ -1206,6 +1206,13 @@ if "cpp_compiler_launcher" in env:
 # Build subdirs, the build order is dependent on link order.
 Export("env")
 
+# DLSS SDK (NVIDIA NGX) - Add library for linking on supported platforms
+if env["platform"] == "linuxbsd" and env["arch"] == "x86_64":
+    dlss_lib_dir = Dir("#DLSS/lib/Linux_x86_64/").abspath
+    if os.path.exists(dlss_lib_dir):
+        env.Prepend(LIBPATH=[dlss_lib_dir])
+        env.Prepend(LIBS=["nvsdk_ngx", "dl", "pthread"])
+
 SConscript("core/SCsub")
 SConscript("servers/SCsub")
 SConscript("scene/SCsub")

@@ -31,6 +31,7 @@
 #pragma once
 
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
+#include "servers/rendering/renderer_rd/shaders/effects/exposure_scale.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/luminance_reduce.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/luminance_reduce_raster.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
@@ -86,6 +87,17 @@ private:
 		PipelineCacheRD pipelines[LUMINANCE_REDUCE_FRAGMENT_MAX];
 	} luminance_reduce_raster;
 
+	struct ExposureScalePushConstant {
+		float exposure_scale;
+		float pad[3];
+	};
+
+	struct ExposureScale {
+		ExposureScaleShaderRD shader;
+		RID shader_version;
+		RID pipeline;
+	} exposure_scale;
+
 public:
 	class LuminanceBuffers : public RenderBufferCustomDataRD {
 		GDCLASS(LuminanceBuffers, RenderBufferCustomDataRD);
@@ -96,6 +108,7 @@ public:
 	public:
 		Vector<RID> reduce;
 		RID current;
+		RID exposure;
 
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override;
 		virtual void free_data() override;
@@ -105,7 +118,9 @@ public:
 
 	Ref<LuminanceBuffers> get_luminance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers);
 	RID get_current_luminance_buffer(Ref<RenderSceneBuffersRD> p_render_buffers);
+	RID get_exposure_scale_buffer(Ref<RenderSceneBuffersRD> p_render_buffers);
 	void luminance_reduction(RID p_source_texture, const Size2i p_source_size, Ref<LuminanceBuffers> p_luminance_buffers, float p_min_luminance, float p_max_luminance, float p_adjust, bool p_set = false);
+	void update_exposure_scale(Ref<RenderSceneBuffersRD> p_render_buffers, float p_exposure_scale);
 
 	Luminance(bool p_prefer_raster_effects);
 	~Luminance();
