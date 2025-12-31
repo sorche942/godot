@@ -1756,6 +1756,7 @@ void RendererSceneRenderRD::init() {
 	mfx_spatial = memnew(RendererRD::MFXSpatialEffect);
 #endif
 	resolve_effects = memnew(RendererRD::Resolve(!can_use_storage));
+	brixelizer_gi = memnew(RendererRD::BrixelizerGI);
 }
 
 RendererSceneRenderRD::~RendererSceneRenderRD() {
@@ -1795,6 +1796,9 @@ RendererSceneRenderRD::~RendererSceneRenderRD() {
 
 	if (resolve_effects) {
 		memdelete(resolve_effects);
+	}
+	if (brixelizer_gi) {
+		memdelete(brixelizer_gi);
 	}
 
 	if (sky.sky_scene_state.uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sky.sky_scene_state.uniform_set)) {

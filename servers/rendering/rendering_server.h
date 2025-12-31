@@ -1368,6 +1368,10 @@ public:
 
 	virtual void environment_set_sdfgi_frames_to_update_light(EnvironmentSDFGIFramesToUpdateLight p_update) = 0;
 
+	/* BRIXELIZER GI */
+
+	virtual void environment_set_brixelizer_gi(RID p_env, bool p_enable, float p_energy, float p_min_step, int p_cascades) = 0;
+
 	enum EnvironmentFogMode {
 		ENV_FOG_MODE_EXPONENTIAL,
 		ENV_FOG_MODE_DEPTH,

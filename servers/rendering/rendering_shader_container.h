@@ -74,7 +74,8 @@ protected:
 		uint32_t type = 0;
 		uint32_t binding = 0;
 		uint32_t stages = 0;
-		uint32_t length = 0; // Size of arrays (in total elements), or UBOs (in bytes * total elements).
+		uint32_t length = 0; // Descriptor array size (1 for non-arrays).
+		uint32_t block_size = 0; // UBO/SSBO size in bytes (0 if not applicable).
 		uint32_t writable = 0;
 
 		bool operator<(const ReflectionBindingData &p_other) const {
@@ -172,7 +173,8 @@ protected:
 
 		ReflectImageTraits image;
 
-		uint32_t length = 0; // Size of arrays (in total elements), or ubos (in bytes * total elements).
+		uint32_t length = 0; // Descriptor array size (1 for non-arrays).
+		uint32_t block_size = 0; // UBO/SSBO size in bytes (0 if not applicable).
 		bool writable = false;
 
 		bool operator<(const ReflectUniform &p_other) const {
@@ -190,6 +192,9 @@ protected:
 			}
 			if (length != p_other.length) {
 				return length < p_other.length;
+			}
+			if (block_size != p_other.block_size) {
+				return block_size < p_other.block_size;
 			}
 			return false;
 		}

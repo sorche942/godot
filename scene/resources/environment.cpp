@@ -598,6 +598,53 @@ void Environment::_update_sdfgi() {
 			sdfgi_probe_bias);
 }
 
+// BrixelizerGI
+
+void Environment::set_brixelizer_gi_enabled(bool p_enabled) {
+	brixelizer_gi_enabled = p_enabled;
+	_update_brixelizer_gi();
+}
+
+bool Environment::is_brixelizer_gi_enabled() const {
+	return brixelizer_gi_enabled;
+}
+
+void Environment::set_brixelizer_gi_energy(float p_energy) {
+	brixelizer_gi_energy = p_energy;
+	_update_brixelizer_gi();
+}
+
+float Environment::get_brixelizer_gi_energy() const {
+	return brixelizer_gi_energy;
+}
+
+void Environment::set_brixelizer_gi_min_step(float p_min_step) {
+	brixelizer_gi_min_step = p_min_step;
+	_update_brixelizer_gi();
+}
+
+float Environment::get_brixelizer_gi_min_step() const {
+	return brixelizer_gi_min_step;
+}
+
+void Environment::set_brixelizer_gi_cascades(int p_cascades) {
+	brixelizer_gi_cascades = p_cascades;
+	_update_brixelizer_gi();
+}
+
+int Environment::get_brixelizer_gi_cascades() const {
+	return brixelizer_gi_cascades;
+}
+
+void Environment::_update_brixelizer_gi() {
+	RS::get_singleton()->environment_set_brixelizer_gi(
+			environment,
+			brixelizer_gi_enabled,
+			brixelizer_gi_energy,
+			brixelizer_gi_min_step,
+			brixelizer_gi_cascades);
+}
+
 // Glow
 
 void Environment::set_glow_enabled(bool p_enabled) {
@@ -1401,6 +1448,22 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_energy"), "set_sdfgi_energy", "get_sdfgi_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_normal_bias"), "set_sdfgi_normal_bias", "get_sdfgi_normal_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_probe_bias"), "set_sdfgi_probe_bias", "get_sdfgi_probe_bias");
+
+	// BrixelizerGI
+	ClassDB::bind_method(D_METHOD("set_brixelizer_gi_enabled", "enabled"), &Environment::set_brixelizer_gi_enabled);
+	ClassDB::bind_method(D_METHOD("is_brixelizer_gi_enabled"), &Environment::is_brixelizer_gi_enabled);
+	ClassDB::bind_method(D_METHOD("set_brixelizer_gi_energy", "energy"), &Environment::set_brixelizer_gi_energy);
+	ClassDB::bind_method(D_METHOD("get_brixelizer_gi_energy"), &Environment::get_brixelizer_gi_energy);
+	ClassDB::bind_method(D_METHOD("set_brixelizer_gi_min_step", "min_step"), &Environment::set_brixelizer_gi_min_step);
+	ClassDB::bind_method(D_METHOD("get_brixelizer_gi_min_step"), &Environment::get_brixelizer_gi_min_step);
+	ClassDB::bind_method(D_METHOD("set_brixelizer_gi_cascades", "cascades"), &Environment::set_brixelizer_gi_cascades);
+	ClassDB::bind_method(D_METHOD("get_brixelizer_gi_cascades"), &Environment::get_brixelizer_gi_cascades);
+
+	ADD_GROUP("BrixelizerGI", "brixelizer_gi_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "brixelizer_gi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_brixelizer_gi_enabled", "is_brixelizer_gi_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "brixelizer_gi_energy", PROPERTY_HINT_RANGE, "0,16,0.01"), "set_brixelizer_gi_energy", "get_brixelizer_gi_energy");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "brixelizer_gi_min_step", PROPERTY_HINT_RANGE, "0.01,64,0.01"), "set_brixelizer_gi_min_step", "get_brixelizer_gi_min_step");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "brixelizer_gi_cascades", PROPERTY_HINT_RANGE, "1,8,1"), "set_brixelizer_gi_cascades", "get_brixelizer_gi_cascades");
 
 	// Glow
 

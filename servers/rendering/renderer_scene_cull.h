@@ -1360,6 +1360,9 @@ public:
 	PASS1(environment_set_sdfgi_frames_to_converge, RS::EnvironmentSDFGIFramesToConverge)
 	PASS1(environment_set_sdfgi_frames_to_update_light, RS::EnvironmentSDFGIFramesToUpdateLight)
 
+	// BrixelizerGI
+	PASS5(environment_set_brixelizer_gi, RID, bool, float, float, int)
+
 	// Adjustment
 	PASS7(environment_set_adjustment, RID, bool, float, float, float, bool, RID)
 

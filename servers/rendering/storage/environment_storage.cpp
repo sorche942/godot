@@ -894,6 +894,42 @@ RS::EnvironmentSDFGIYScale RendererEnvironmentStorage::environment_get_sdfgi_y_s
 	return env->sdfgi_y_scale;
 }
 
+// BrixelizerGI
+
+void RendererEnvironmentStorage::environment_set_brixelizer_gi(RID p_env, bool p_enable, float p_energy, float p_min_step, int p_cascades) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+
+	env->brixelizer_gi_enabled = p_enable;
+	env->brixelizer_gi_energy = p_energy;
+	env->brixelizer_gi_min_step = p_min_step;
+	env->brixelizer_gi_cascades = p_cascades;
+}
+
+bool RendererEnvironmentStorage::environment_get_brixelizer_gi_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->brixelizer_gi_enabled;
+}
+
+float RendererEnvironmentStorage::environment_get_brixelizer_gi_energy(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1.0);
+	return env->brixelizer_gi_energy;
+}
+
+float RendererEnvironmentStorage::environment_get_brixelizer_gi_min_step(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.2);
+	return env->brixelizer_gi_min_step;
+}
+
+int RendererEnvironmentStorage::environment_get_brixelizer_gi_cascades(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 4);
+	return env->brixelizer_gi_cascades;
+}
+
 // Adjustments
 
 void RendererEnvironmentStorage::environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) {

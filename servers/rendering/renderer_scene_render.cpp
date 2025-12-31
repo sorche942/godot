@@ -705,6 +705,28 @@ RS::EnvironmentSDFGIYScale RendererSceneRender::environment_get_sdfgi_y_scale(RI
 	return environment_storage.environment_get_sdfgi_y_scale(p_env);
 }
 
+// BrixelizerGI
+
+void RendererSceneRender::environment_set_brixelizer_gi(RID p_env, bool p_enable, float p_energy, float p_min_step, int p_cascades) {
+	environment_storage.environment_set_brixelizer_gi(p_env, p_enable, p_energy, p_min_step, p_cascades);
+}
+
+bool RendererSceneRender::environment_get_brixelizer_gi_enabled(RID p_env) const {
+	return environment_storage.environment_get_brixelizer_gi_enabled(p_env);
+}
+
+float RendererSceneRender::environment_get_brixelizer_gi_energy(RID p_env) const {
+	return environment_storage.environment_get_brixelizer_gi_energy(p_env);
+}
+
+float RendererSceneRender::environment_get_brixelizer_gi_min_step(RID p_env) const {
+	return environment_storage.environment_get_brixelizer_gi_min_step(p_env);
+}
+
+int RendererSceneRender::environment_get_brixelizer_gi_cascades(RID p_env) const {
+	return environment_storage.environment_get_brixelizer_gi_cascades(p_env);
+}
+
 // Adjustments
 
 void RendererSceneRender::environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) {

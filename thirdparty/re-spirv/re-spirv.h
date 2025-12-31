@@ -203,6 +203,9 @@ namespace respv {
         bool empty() const;
     };
 
+    bool find_unsupported_ops(const void *pData, size_t pSize, std::vector<uint32_t> &outOps);
+    const char *get_opcode_name(uint32_t pOp);
+
     struct Options {
         bool removeDeadCode = true;
     };

@@ -71,6 +71,8 @@ namespace respv {
         case SpvOpDecorate:
         case SpvOpMemberDecorate:
         case SpvOpVectorShuffle:
+        case SpvOpVectorExtractDynamic:
+        case SpvOpVectorInsertDynamic:
         case SpvOpCompositeConstruct:
         case SpvOpCompositeExtract:
         case SpvOpCompositeInsert:
@@ -368,6 +370,7 @@ namespace respv {
             rOperandWordSkipString = false;
             return true;
         case SpvOpVectorShuffle:
+        case SpvOpVectorExtractDynamic:
         case SpvOpCompositeInsert:
         case SpvOpSampledImage:
         case SpvOpImageQuerySizeLod:
@@ -444,6 +447,7 @@ namespace respv {
             rOperandWordSkipString = false;
             return true;
         case SpvOpImageTexelPointer:
+        case SpvOpVectorInsertDynamic:
         case SpvOpSelect:
         case SpvOpBitFieldSExtract:
         case SpvOpBitFieldUExtract:
@@ -2247,6 +2251,42 @@ namespace respv {
 
     bool Shader::empty() const {
         return inlinedSpirvWords.empty() && ((extSpirvWords == nullptr) || (extSpirvWordCount == 0));
+    }
+
+    bool find_unsupported_ops(const void *pData, size_t pSize, std::vector<uint32_t> &outOps) {
+        outOps.clear();
+        if ((pData == nullptr) || (pSize < sizeof(uint32_t) * SpvStartWordIndex)) {
+            return false;
+        }
+
+        const uint32_t *words = reinterpret_cast<const uint32_t *>(pData);
+        const size_t wordCount = pSize / sizeof(uint32_t);
+        if (words[0] != SpvMagicNumber) {
+            return false;
+        }
+
+        for (uint32_t wordIndex = SpvStartWordIndex; wordIndex < wordCount;) {
+            uint32_t packed = words[wordIndex];
+            uint32_t opCode = packed & 0xFFFFU;
+            uint32_t wordCountForOp = (packed >> 16U) & 0xFFFFU;
+            if ((wordCountForOp == 0) || (wordIndex + wordCountForOp > wordCount)) {
+                return false;
+            }
+
+            if (!SpvIsSupported(SpvOp(opCode))) {
+                if (std::find(outOps.begin(), outOps.end(), opCode) == outOps.end()) {
+                    outOps.push_back(opCode);
+                }
+            }
+
+            wordIndex += wordCountForOp;
+        }
+
+        return true;
+    }
+
+    const char *get_opcode_name(uint32_t pOp) {
+        return SpvOpToString(SpvOp(pOp));
     }
 
     // Optimizer

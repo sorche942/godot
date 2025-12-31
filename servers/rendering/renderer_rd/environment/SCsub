@@ -3,4 +3,6 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
-env.add_source_files(env.servers_sources, "*.cpp")
+env_env = env.Clone()
+env_env.Prepend(CPPPATH=["#thirdparty/amd-brixelizer/"])
+env_env.add_source_files(env.servers_sources, "*.cpp")

@@ -3,6 +3,23 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
+# Thirdparty Brixelizer
+env_brixelizer = env.Clone()
+thirdparty_brix_obj = []
+thirdparty_brix_dir = "#thirdparty/amd-brixelizer/"
+thirdparty_brix_sources = [
+    "ffx_brixelizer.cpp", 
+    "ffx_brixelizer_raw.cpp", 
+    "ffx_brixelizergi.cpp"
+]
+thirdparty_brix_sources = [thirdparty_brix_dir + file for file in thirdparty_brix_sources]
+
+env_brixelizer.Prepend(CPPPATH=[thirdparty_brix_dir])
+env_brixelizer.Append(CPPDEFINES=["FFX_GCC"])
+env_brixelizer.disable_warnings()
+env_brixelizer.add_source_files(thirdparty_brix_obj, thirdparty_brix_sources)
+env.servers_sources += thirdparty_brix_obj
+
 env.add_source_files(env.servers_sources, "*.cpp")
 
 SConscript("effects/SCsub")

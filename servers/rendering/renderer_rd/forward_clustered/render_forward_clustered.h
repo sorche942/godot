@@ -745,6 +745,9 @@ private:
 	/* SDFGI */
 	void _update_sdfgi(RenderDataRD *p_render_data);
 
+	/* BrixelizerGI */
+	void _update_brixelizer_gi(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, Ref<RenderBufferDataForwardClustered> p_rb_data);
+
 	/* Volumetric fog */
 	RID shadow_sampler;
 

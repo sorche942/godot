@@ -171,6 +171,12 @@ private:
 		float sdfgi_probe_bias = 1.1;
 		RS::EnvironmentSDFGIYScale sdfgi_y_scale = RS::ENV_SDFGI_Y_SCALE_75_PERCENT;
 
+		// BrixelizerGI
+		bool brixelizer_gi_enabled = false;
+		float brixelizer_gi_energy = 1.0;
+		float brixelizer_gi_min_step = 0.2;
+		int brixelizer_gi_cascades = 4;
+
 		// Adjustments
 		bool adjustments_enabled = false;
 		float adjustments_brightness = 1.0f;
@@ -322,6 +328,13 @@ public:
 	float environment_get_sdfgi_normal_bias(RID p_env) const;
 	float environment_get_sdfgi_probe_bias(RID p_env) const;
 	RS::EnvironmentSDFGIYScale environment_get_sdfgi_y_scale(RID p_env) const;
+
+	// BrixelizerGI
+	void environment_set_brixelizer_gi(RID p_env, bool p_enable, float p_energy, float p_min_step, int p_cascades);
+	bool environment_get_brixelizer_gi_enabled(RID p_env) const;
+	float environment_get_brixelizer_gi_energy(RID p_env) const;
+	float environment_get_brixelizer_gi_min_step(RID p_env) const;
+	int environment_get_brixelizer_gi_cascades(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

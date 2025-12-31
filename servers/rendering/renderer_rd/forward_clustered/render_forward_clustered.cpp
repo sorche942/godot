@@ -1577,6 +1577,13 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		gi.process_gi(rb, p_normal_roughness_slices, p_voxel_gi_buffer, p_render_data->environment, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances);
 	}
 
+	// Process BrixelizerGI after regular GI and after depth pass has resolved
+	if (brixelizer_gi && p_render_data->environment.is_valid() && environment_get_brixelizer_gi_enabled(p_render_data->environment)) {
+		_update_brixelizer_gi(p_render_data, rb, rb_data);
+		// Composite BrixelizerGI output to the GI buffers for use by the forward shader
+		brixelizer_gi->composite_output(rb);
+	}
+
 	if (render_shadows) {
 		_render_shadow_end();
 	}
@@ -1803,6 +1810,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_ssr = false;
 	bool using_sdfgi = false;
 	bool using_voxelgi = false;
+	bool using_brixelizer_gi = false;
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
@@ -1844,6 +1852,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (environment_get_sdfgi_enabled(p_render_data->environment) && get_debug_draw_mode() != RS::VIEWPORT_DEBUG_DRAW_UNSHADED) {
 				using_sdfgi = true;
 			}
+			if (environment_get_brixelizer_gi_enabled(p_render_data->environment)) {
+				using_brixelizer_gi = true;
+			}
 			if (environment_get_ssr_enabled(p_render_data->environment)) {
 				if (!p_render_data->transparent_bg) {
 					using_ssr = true;
@@ -1878,7 +1889,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// May have changed due to the above (light buffer enlarged, as an example).
 	_update_render_base_uniform_set();
 
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_brixelizer_gi, using_motion_pass);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -1889,6 +1900,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
 
 	RD::get_singleton()->draw_command_end_label();
+
+	// Note: BrixelizerGI update is called later, after depth prepass and GI processing
 
 	if (!is_reflection_probe) {
 		if (using_voxelgi) {
@@ -2420,6 +2433,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	{
 		RENDER_TIMESTAMP("Process Post Transparent Compositor Effects");
 		_process_compositor_effects(RS::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data);
+	}
+
+	if (brixelizer_gi && p_render_data->environment.is_valid() && environment_get_brixelizer_gi_enabled(p_render_data->environment)) {
+		brixelizer_gi->store_prev_lit_output(rb);
 	}
 
 	if (rb_data.is_valid() && (using_upscaling || using_taa)) {
@@ -4969,6 +4986,43 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 	scene_shader.set_default_specialization(specialization);
 
 	base_uniforms_changed(); //also need this
+}
+
+void RenderForwardClustered::_update_brixelizer_gi(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, Ref<RenderBufferDataForwardClustered> p_rb_data) {
+	if (!brixelizer_gi || p_render_buffers.is_null()) {
+		return;
+	}
+
+	RendererRD::BrixelizerGI::InputTextures input_textures;
+
+	// Get depth texture
+	if (p_render_buffers->has_depth_texture()) {
+		input_textures.depth = p_render_buffers->get_depth_texture();
+	}
+
+	// Get normal/roughness texture
+	if (p_rb_data.is_valid() && p_rb_data->has_normal_roughness()) {
+		input_textures.normal_roughness = p_rb_data->get_normal_roughness();
+	}
+
+	// Get velocity buffer
+	if (p_render_buffers->has_velocity_buffer(false)) {
+		input_textures.velocity = p_render_buffers->get_velocity_buffer(false);
+	}
+
+	// TODO: Store previous frame textures for temporal reprojection
+	// For now, use same as current frame (will cause ghosting but won't crash)
+	input_textures.prev_depth = input_textures.depth;
+	input_textures.prev_normal_roughness = input_textures.normal_roughness;
+
+	// TODO: Get environment map from sky/reflection probes
+	// input_textures.environment_map = ...
+
+	// TODO: Generate or load blue noise texture
+	// input_textures.noise = ...
+
+	// Pass geometry instances for mesh registration
+	brixelizer_gi->update(p_render_data, input_textures, p_render_data->instances);
 }
 
 RenderForwardClustered::RenderForwardClustered() {

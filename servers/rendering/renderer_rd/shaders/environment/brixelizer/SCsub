@@ -1,0 +1,7 @@
+
+Import("env")
+
+if "RD_GLSL" in env["BUILDERS"]:
+    glsl_files = Glob("*.glsl")
+    for glsl_file in glsl_files:
+        env.RD_GLSL(glsl_file)

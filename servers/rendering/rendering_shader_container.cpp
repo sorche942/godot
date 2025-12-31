@@ -375,16 +375,12 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 						} break;
 					}
 
-					if (need_array_dimensions) {
-						uniform.length = 1;
-						for (uint32_t k = 0; k < binding.array.dims_count; k++) {
-							uniform.length *= binding.array.dims[k];
-						}
-					} else if (need_block_size) {
-						uniform.length = binding.block.size;
-					} else {
-						uniform.length = 0;
+					uint32_t array_length = 1;
+					for (uint32_t k = 0; k < binding.array.dims_count; k++) {
+						array_length *= binding.array.dims[k];
 					}
+					uniform.length = array_length;
+					uniform.block_size = need_block_size ? binding.block.size : 0;
 
 					if (may_be_writable) {
 						if (binding.descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
@@ -416,7 +412,7 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 										"On shader stage '" + String(RDC::SHADER_STAGE_NAMES[stage]) + "', uniform '" + binding.name + "' trying to reuse location for set=" + itos(set) + ", binding=" + itos(uniform.binding) + " with different uniform type.");
 
 								// Also, verify that it's the same size.
-								ERR_FAIL_COND_V_MSG(reflection.uniform_sets[set][k].length != uniform.length, FAILED,
+								ERR_FAIL_COND_V_MSG(reflection.uniform_sets[set][k].length != uniform.length || reflection.uniform_sets[set][k].block_size != uniform.block_size, FAILED,
 										"On shader stage '" + String(RDC::SHADER_STAGE_NAMES[stage]) + "', uniform '" + binding.name + "' trying to reuse location for set=" + itos(set) + ", binding=" + itos(uniform.binding) + " with different uniform size.");
 
 								// Also, verify that it has the same writability.
@@ -629,6 +625,7 @@ void RenderingShaderContainer::set_from_shader_reflection(const ReflectShader &p
 			binding_data.binding = uniform.binding;
 			binding_data.stages = uint32_t(uniform.stages);
 			binding_data.length = uniform.length;
+			binding_data.block_size = uniform.block_size;
 			binding_data.writable = uint32_t(uniform.writable);
 			reflection_binding_set_uniforms_data.push_back(binding_data);
 		}
@@ -690,6 +687,7 @@ RenderingDeviceCommons::ShaderReflection RenderingShaderContainer::get_shader_re
 			uniform.type = RDC::UniformType(binding.type);
 			uniform.writable = binding.writable;
 			uniform.length = binding.length;
+			uniform.block_size = binding.block_size;
 			uniform.binding = binding.binding;
 			uniform.stages = binding.stages;
 		}
@@ -754,6 +752,13 @@ bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 	reflection_binding_set_uniforms_data.clear();
 
 	uint32_t uniform_index = 0;
+	struct ReflectionBindingDataV1 {
+		uint32_t type;
+		uint32_t binding;
+		uint32_t stages;
+		uint32_t length;
+		uint32_t writable;
+	};
 	for (uint32_t i = 0; i < reflection_data.set_count; i++) {
 		ERR_FAIL_COND_V_MSG(int64_t(bytes_offset + sizeof(uint32_t)) > p_bytes.size(), false, "Not enough bytes for uniform set count in shader container.");
 		uint32_t uniforms_count = *(uint32_t *)(&bytes_ptr[bytes_offset]);
@@ -764,9 +769,31 @@ bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 		bytes_offset += _from_bytes_reflection_binding_uniform_extra_data_start(&bytes_ptr[bytes_offset]);
 
 		for (uint32_t j = 0; j < uniforms_count; j++) {
-			ERR_FAIL_COND_V_MSG(int64_t(bytes_offset + sizeof(ReflectionBindingData)) > p_bytes.size(), false, "Not enough bytes for uniform in shader container.");
-			memcpy(&reflection_binding_set_uniforms_data.ptrw()[uniform_index], &bytes_ptr[bytes_offset], sizeof(ReflectionBindingData));
-			bytes_offset += sizeof(ReflectionBindingData);
+			if (container_header.format_version < 2) {
+				ERR_FAIL_COND_V_MSG(int64_t(bytes_offset + sizeof(ReflectionBindingDataV1)) > p_bytes.size(), false, "Not enough bytes for uniform in shader container.");
+				ReflectionBindingDataV1 legacy_binding = {};
+				memcpy(&legacy_binding, &bytes_ptr[bytes_offset], sizeof(ReflectionBindingDataV1));
+				bytes_offset += sizeof(ReflectionBindingDataV1);
+
+				ReflectionBindingData &binding = reflection_binding_set_uniforms_data.ptrw()[uniform_index];
+				binding.type = legacy_binding.type;
+				binding.binding = legacy_binding.binding;
+				binding.stages = legacy_binding.stages;
+				binding.writable = legacy_binding.writable;
+
+				if (legacy_binding.type == RDC::UNIFORM_TYPE_UNIFORM_BUFFER || legacy_binding.type == RDC::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+						legacy_binding.type == RDC::UNIFORM_TYPE_STORAGE_BUFFER || legacy_binding.type == RDC::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC) {
+					binding.length = 1;
+					binding.block_size = legacy_binding.length;
+				} else {
+					binding.length = legacy_binding.length;
+					binding.block_size = 0;
+				}
+			} else {
+				ERR_FAIL_COND_V_MSG(int64_t(bytes_offset + sizeof(ReflectionBindingData)) > p_bytes.size(), false, "Not enough bytes for uniform in shader container.");
+				memcpy(&reflection_binding_set_uniforms_data.ptrw()[uniform_index], &bytes_ptr[bytes_offset], sizeof(ReflectionBindingData));
+				bytes_offset += sizeof(ReflectionBindingData);
+			}
 			bytes_offset += _from_bytes_reflection_binding_uniform_extra_data(&bytes_ptr[bytes_offset], uniform_index);
 			uniform_index++;
 		}

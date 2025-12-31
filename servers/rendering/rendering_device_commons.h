@@ -1045,10 +1045,11 @@ public:
 		bool writable = false;
 		uint32_t binding = 0;
 		BitField<ShaderStage> stages = {};
-		uint32_t length = 0; // Size of arrays (in total elements), or ubos (in bytes * total elements).
+		uint32_t length = 0; // Descriptor array size (1 for non-arrays).
+		uint32_t block_size = 0; // UBO/SSBO size in bytes (0 if not applicable).
 
 		bool operator!=(const ShaderUniform &p_other) const {
-			return binding != p_other.binding || type != p_other.type || writable != p_other.writable || stages != p_other.stages || length != p_other.length;
+			return binding != p_other.binding || type != p_other.type || writable != p_other.writable || stages != p_other.stages || length != p_other.length || block_size != p_other.block_size;
 		}
 
 		bool operator<(const ShaderUniform &p_other) const {
@@ -1066,6 +1067,9 @@ public:
 			}
 			if (length != p_other.length) {
 				return length < p_other.length;
+			}
+			if (block_size != p_other.block_size) {
+				return block_size < p_other.block_size;
 			}
 			return false;
 		}

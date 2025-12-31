@@ -34,7 +34,7 @@
 
 // RenderingShaderContainerVulkan
 
-const uint32_t RenderingShaderContainerVulkan::FORMAT_VERSION = 1;
+const uint32_t RenderingShaderContainerVulkan::FORMAT_VERSION = 2;
 
 uint32_t RenderingShaderContainerVulkan::_format() const {
 	return 0x43565053;

@@ -3851,15 +3851,19 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 				} break;
 				case UNIFORM_TYPE_UNIFORM_BUFFER: {
 					layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+					layout_binding.descriptorCount = MAX(1u, uniform.length);
 				} break;
 				case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC: {
 					layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+					layout_binding.descriptorCount = MAX(1u, uniform.length);
 				} break;
 				case UNIFORM_TYPE_STORAGE_BUFFER: {
 					layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					layout_binding.descriptorCount = MAX(1u, uniform.length);
 				} break;
 				case UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC: {
 					layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+					layout_binding.descriptorCount = MAX(1u, uniform.length);
 				} break;
 				case UNIFORM_TYPE_INPUT_ATTACHMENT: {
 					layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
@@ -3928,6 +3932,17 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 			if (respv_shader.empty()) {
 #if RESPV_VERBOSE
 				print_line("re-spirv failed to parse the shader, skipping optimization.");
+				std::vector<uint32_t> unsupported_ops;
+				if (respv::find_unsupported_ops(decoded_spirv.ptr(), decoded_spirv.size(), unsupported_ops) && !unsupported_ops.empty()) {
+					String op_names;
+					for (size_t op_index = 0; op_index < unsupported_ops.size(); op_index++) {
+						if (op_index > 0) {
+							op_names += ", ";
+						}
+						op_names += respv::get_opcode_name(unsupported_ops[op_index]);
+					}
+					print_line(vformat("re-spirv unsupported ops in stage %s: %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]), op_names));
+				}
 #endif
 				if (store_respv) {
 					shader_info.respv_stage_shaders.push_back(respv::Shader());
@@ -4349,62 +4364,80 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 				CRASH_NOW_MSG("Unimplemented!"); // TODO.
 			} break;
 			case UNIFORM_TYPE_UNIFORM_BUFFER: {
-				const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[0].id;
-				VkDescriptorBufferInfo *vk_buf_info = ALLOCA_SINGLE(VkDescriptorBufferInfo);
-				*vk_buf_info = {};
-				vk_buf_info->buffer = buf_info->vk_buffer;
-				vk_buf_info->range = buf_info->size;
+				num_descriptors = uniform.ids.size();
+				VkDescriptorBufferInfo *vk_buf_infos = ALLOCA_ARRAY(VkDescriptorBufferInfo, num_descriptors);
 
-				ERR_FAIL_COND_V_MSG(buf_info->is_dynamic(), UniformSetID(),
-						"Sent a buffer with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_UNIFORM_BUFFER instead of UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC.");
+				for (uint32_t j = 0; j < num_descriptors; j++) {
+					const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[j].id;
+					vk_buf_infos[j] = {};
+					vk_buf_infos[j].buffer = buf_info->vk_buffer;
+					vk_buf_infos[j].range = buf_info->size;
+
+					ERR_FAIL_COND_V_MSG(buf_info->is_dynamic(), UniformSetID(),
+							"Sent a buffer with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_UNIFORM_BUFFER instead of UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC.");
+				}
 
 				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-				vk_writes[writes_amount].pBufferInfo = vk_buf_info;
+				vk_writes[writes_amount].pBufferInfo = vk_buf_infos;
 			} break;
 			case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC: {
-				const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[0].id;
-				VkDescriptorBufferInfo *vk_buf_info = ALLOCA_SINGLE(VkDescriptorBufferInfo);
-				*vk_buf_info = {};
-				vk_buf_info->buffer = buf_info->vk_buffer;
-				vk_buf_info->range = buf_info->size;
-
-				ERR_FAIL_COND_V_MSG(!buf_info->is_dynamic(), UniformSetID(),
-						"Sent a buffer without BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC instead of UNIFORM_TYPE_UNIFORM_BUFFER.");
-				ERR_FAIL_COND_V_MSG(num_dynamic_buffers >= MAX_DYNAMIC_BUFFERS, UniformSetID(),
+				num_descriptors = uniform.ids.size();
+				ERR_FAIL_COND_V_MSG(num_dynamic_buffers + num_descriptors > MAX_DYNAMIC_BUFFERS, UniformSetID(),
 						"Uniform set exceeded the limit of dynamic/persistent buffers. (" + itos(MAX_DYNAMIC_BUFFERS) + ").");
 
-				dynamic_buffers[num_dynamic_buffers++] = buf_info;
+				VkDescriptorBufferInfo *vk_buf_infos = ALLOCA_ARRAY(VkDescriptorBufferInfo, num_descriptors);
+				for (uint32_t j = 0; j < num_descriptors; j++) {
+					const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[j].id;
+					vk_buf_infos[j] = {};
+					vk_buf_infos[j].buffer = buf_info->vk_buffer;
+					vk_buf_infos[j].range = buf_info->size;
+
+					ERR_FAIL_COND_V_MSG(!buf_info->is_dynamic(), UniformSetID(),
+							"Sent a buffer without BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC instead of UNIFORM_TYPE_UNIFORM_BUFFER.");
+
+					dynamic_buffers[num_dynamic_buffers++] = buf_info;
+				}
+
 				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-				vk_writes[writes_amount].pBufferInfo = vk_buf_info;
+				vk_writes[writes_amount].pBufferInfo = vk_buf_infos;
 			} break;
 			case UNIFORM_TYPE_STORAGE_BUFFER: {
-				const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[0].id;
-				VkDescriptorBufferInfo *vk_buf_info = ALLOCA_SINGLE(VkDescriptorBufferInfo);
-				*vk_buf_info = {};
-				vk_buf_info->buffer = buf_info->vk_buffer;
-				vk_buf_info->range = buf_info->size;
+				num_descriptors = uniform.ids.size();
+				VkDescriptorBufferInfo *vk_buf_infos = ALLOCA_ARRAY(VkDescriptorBufferInfo, num_descriptors);
 
-				ERR_FAIL_COND_V_MSG(buf_info->is_dynamic(), UniformSetID(),
-						"Sent a buffer with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_STORAGE_BUFFER instead of UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC.");
+				for (uint32_t j = 0; j < num_descriptors; j++) {
+					const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[j].id;
+					vk_buf_infos[j] = {};
+					vk_buf_infos[j].buffer = buf_info->vk_buffer;
+					vk_buf_infos[j].range = buf_info->size;
+
+					ERR_FAIL_COND_V_MSG(buf_info->is_dynamic(), UniformSetID(),
+							"Sent a buffer with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_STORAGE_BUFFER instead of UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC.");
+				}
 
 				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-				vk_writes[writes_amount].pBufferInfo = vk_buf_info;
+				vk_writes[writes_amount].pBufferInfo = vk_buf_infos;
 			} break;
 			case UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC: {
-				const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[0].id;
-				VkDescriptorBufferInfo *vk_buf_info = ALLOCA_SINGLE(VkDescriptorBufferInfo);
-				*vk_buf_info = {};
-				vk_buf_info->buffer = buf_info->vk_buffer;
-				vk_buf_info->range = buf_info->size;
-
-				ERR_FAIL_COND_V_MSG(!buf_info->is_dynamic(), UniformSetID(),
-						"Sent a buffer without BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC instead of UNIFORM_TYPE_STORAGE_BUFFER.");
-				ERR_FAIL_COND_V_MSG(num_dynamic_buffers >= MAX_DYNAMIC_BUFFERS, UniformSetID(),
+				num_descriptors = uniform.ids.size();
+				ERR_FAIL_COND_V_MSG(num_dynamic_buffers + num_descriptors > MAX_DYNAMIC_BUFFERS, UniformSetID(),
 						"Uniform set exceeded the limit of dynamic/persistent buffers. (" + itos(MAX_DYNAMIC_BUFFERS) + ").");
 
-				dynamic_buffers[num_dynamic_buffers++] = buf_info;
+				VkDescriptorBufferInfo *vk_buf_infos = ALLOCA_ARRAY(VkDescriptorBufferInfo, num_descriptors);
+				for (uint32_t j = 0; j < num_descriptors; j++) {
+					const BufferInfo *buf_info = (const BufferInfo *)uniform.ids[j].id;
+					vk_buf_infos[j] = {};
+					vk_buf_infos[j].buffer = buf_info->vk_buffer;
+					vk_buf_infos[j].range = buf_info->size;
+
+					ERR_FAIL_COND_V_MSG(!buf_info->is_dynamic(), UniformSetID(),
+							"Sent a buffer without BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT but binding (" + itos(uniform.binding) + "), set (" + itos(p_set_index) + ") is UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC instead of UNIFORM_TYPE_STORAGE_BUFFER.");
+
+					dynamic_buffers[num_dynamic_buffers++] = buf_info;
+				}
+
 				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-				vk_writes[writes_amount].pBufferInfo = vk_buf_info;
+				vk_writes[writes_amount].pBufferInfo = vk_buf_infos;
 			} break;
 			case UNIFORM_TYPE_INPUT_ATTACHMENT: {
 				num_descriptors = uniform.ids.size();
