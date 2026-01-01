@@ -588,6 +588,13 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	}
 
 	uint32_t device_extension_count = 0;
+#ifdef DEBUG_ENABLED
+#ifdef USE_VOLK
+	if (vkEnumerateDeviceExtensionProperties == nullptr) {
+		ERR_PRINT("volk: vkEnumerateDeviceExtensionProperties is null before device extension query.");
+	}
+#endif
+#endif
 	VkResult err = vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &device_extension_count, nullptr);
 	ERR_FAIL_COND_V(err != VK_SUCCESS, ERR_CANT_CREATE);
 	ERR_FAIL_COND_V_MSG(device_extension_count == 0, ERR_CANT_CREATE, "vkEnumerateDeviceExtensionProperties failed to find any extensions\n\nDo you have a compatible Vulkan installable client driver (ICD) installed?");

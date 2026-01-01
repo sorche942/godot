@@ -545,6 +545,10 @@ if env.debug_features:
     # to give *users* extra debugging information for their game development.
     env.Append(CPPDEFINES=["DEBUG_ENABLED"])
 
+if env["use_volk"]:
+    # Ensure Vulkan is consistently used via volk function pointers.
+    env.Append(CPPDEFINES=["VK_NO_PROTOTYPES"])
+
 if env.dev_build:
     # DEV_ENABLED enables *engine developer* code which should only be compiled for those
     # working on the engine itself.

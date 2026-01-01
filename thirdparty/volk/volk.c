@@ -17,6 +17,11 @@
 #	include <dlfcn.h>
 #endif
 
+#ifdef DEBUG_ENABLED
+#	include <stdio.h>
+#	include <stdlib.h>
+#endif
+
 #ifdef __APPLE__
 #	include <stdlib.h>
 #endif
@@ -2141,6 +2146,17 @@ static void volkGenLoadDeviceTable(struct VolkDeviceTable* table, void* context,
 #endif
 
 /* VOLK_GENERATE_PROTOTYPES_C */
+#ifdef DEBUG_ENABLED
+static VkResult VKAPI_CALL volk_debug_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties) {
+	(void)physicalDevice;
+	(void)pLayerName;
+	(void)pPropertyCount;
+	(void)pProperties;
+	fprintf(stderr, "volk debug: vkEnumerateDeviceExtensionProperties called before volkLoadInstance.\n");
+	fflush(stderr);
+	abort();
+}
+#endif
 #if defined(VK_VERSION_1_0)
 PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers;
 PFN_vkAllocateDescriptorSets vkAllocateDescriptorSets;
@@ -2235,7 +2251,11 @@ PFN_vkDestroySemaphore vkDestroySemaphore;
 PFN_vkDestroyShaderModule vkDestroyShaderModule;
 PFN_vkDeviceWaitIdle vkDeviceWaitIdle;
 PFN_vkEndCommandBuffer vkEndCommandBuffer;
+#ifdef DEBUG_ENABLED
+PFN_vkEnumerateDeviceExtensionProperties vkEnumerateDeviceExtensionProperties = volk_debug_vkEnumerateDeviceExtensionProperties;
+#else
 PFN_vkEnumerateDeviceExtensionProperties vkEnumerateDeviceExtensionProperties;
+#endif
 PFN_vkEnumerateDeviceLayerProperties vkEnumerateDeviceLayerProperties;
 PFN_vkEnumerateInstanceExtensionProperties vkEnumerateInstanceExtensionProperties;
 PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties;

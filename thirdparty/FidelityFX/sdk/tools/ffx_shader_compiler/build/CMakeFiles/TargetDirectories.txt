@@ -1,0 +1,6 @@
+/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/CMakeFiles/FidelityFX_SC.dir
+/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/CMakeFiles/edit_cache.dir
+/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/CMakeFiles/rebuild_cache.dir
+/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/libs/tiny-process-library/CMakeFiles/tiny-process-library.dir
+/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/libs/tiny-process-library/CMakeFiles/edit_cache.dir
+/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/libs/tiny-process-library/CMakeFiles/rebuild_cache.dir

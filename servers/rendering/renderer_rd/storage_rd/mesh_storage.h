@@ -451,6 +451,16 @@ public:
 		return surface->vertex_count;
 	}
 
+	_FORCE_INLINE_ RID mesh_surface_get_vertex_buffer(void *p_surface) {
+		Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return surface->vertex_buffer;
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_vertex_buffer_size(void *p_surface) {
+		Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return surface->vertex_buffer_size;
+	}
+
 	_FORCE_INLINE_ bool mesh_surface_has_lod(void *p_surface) const {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
 		return s->lod_count > 0;
@@ -504,6 +514,21 @@ public:
 		} else {
 			return s->lods[p_lod - 1].index_array;
 		}
+	}
+
+	_FORCE_INLINE_ RID mesh_surface_get_index_buffer(void *p_surface) const {
+		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return s->index_buffer;
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_index_buffer_size(void *p_surface) const {
+		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return s->index_buffer_size;
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_index_count(void *p_surface) const {
+		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return s->index_count;
 	}
 
 	_FORCE_INLINE_ void mesh_surface_get_vertex_arrays_and_format(void *p_surface, uint64_t p_input_mask, bool p_input_motion_vectors, bool p_point_size_emulated, RID &r_vertex_array_rd, RD::VertexFormatID &r_vertex_format) {

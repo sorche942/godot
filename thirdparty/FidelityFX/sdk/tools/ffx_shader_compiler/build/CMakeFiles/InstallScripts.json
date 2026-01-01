@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/cmake_install.cmake",
+		"/home/sorche/Development/godot_src/godot/thirdparty/FidelityFX/sdk/tools/ffx_shader_compiler/build/libs/tiny-process-library/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

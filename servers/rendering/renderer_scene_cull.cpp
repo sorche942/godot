@@ -34,6 +34,7 @@
 #include "core/object/worker_thread_pool.h"
 #include "rendering_light_culler.h"
 #include "rendering_server_default.h"
+#include "renderer_rd/brixelizer_manager.h"
 
 #if defined(DEBUG_ENABLED) && defined(TOOLS_ENABLED)
 // This is used only to obtain node paths for user-friendly physics interpolation warnings.
@@ -593,6 +594,9 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 			case RS::INSTANCE_MULTIMESH:
 			case RS::INSTANCE_PARTICLES: {
 				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+				if (instance->scenario) {
+					brixelizerManager().deleteInstance(p_instance);
+				}
 				scene_render->geometry_instance_free(geom->geometry_instance);
 			} break;
 			case RS::INSTANCE_LIGHT: {
@@ -713,6 +717,10 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				InstanceGeometryData *geom = memnew(InstanceGeometryData);
 				instance->base_data = geom;
 				geom->geometry_instance = scene_render->geometry_instance_create(p_base);
+				if (scenario) {
+					AABB world_aabb = instance->transform.xform(instance->aabb);
+					brixelizerManager().addInstance(p_instance, p_base, instance->transform, world_aabb, instance->dynamic_gi);
+				}
 
 				ERR_FAIL_NULL(geom->geometry_instance);
 
@@ -875,6 +883,10 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 			}
 		}
 
+		if ((1 << instance->base_type) & RS::INSTANCE_GEOMETRY_MASK) {
+			brixelizerManager().deleteInstance(p_instance);
+		}
+
 		instance->scenario = nullptr;
 	}
 
@@ -905,6 +917,11 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 			} break;
 			default: {
 			}
+		}
+
+		if ((1 << instance->base_type) & RS::INSTANCE_GEOMETRY_MASK) {
+			AABB world_aabb = instance->transform.xform(instance->aabb);
+			brixelizerManager().addInstance(p_instance, instance->base, instance->transform, world_aabb, instance->dynamic_gi);
 		}
 
 		_instance_queue_update(instance, true, true);
@@ -993,6 +1010,10 @@ void RendererSceneCull::instance_set_transform(RID p_instance, const Transform3D
 
 #endif
 	instance->transform = p_transform;
+	if ((1 << instance->base_type) & RS::INSTANCE_GEOMETRY_MASK) {
+		AABB world_aabb = p_transform.xform(instance->aabb);
+		brixelizerManager().updateInstance(p_instance, p_transform, world_aabb);
+	}
 	_instance_queue_update(instance, true);
 }
 
