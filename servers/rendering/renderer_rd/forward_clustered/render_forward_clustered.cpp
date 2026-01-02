@@ -31,6 +31,7 @@
 #include "render_forward_clustered.h"
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
+#include "servers/rendering/renderer_rd/brixelizer_manager.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -1700,6 +1701,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// sdfgi first
 	_update_sdfgi(p_render_data);
+
+	// brixelizer second
+	if (!p_render_data->reflection_probe.is_valid()) {
+		Vector3 camera_pos = p_render_data->scene_data->cam_transform.origin;
+		brixelizerManager().frameUpdate(camera_pos);
+	}
 
 	// assign render indices to voxel_gi_instances
 	for (uint32_t i = 0; i < (uint32_t)p_render_data->voxel_gi_instances->size(); i++) {

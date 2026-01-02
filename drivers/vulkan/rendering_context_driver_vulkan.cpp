@@ -736,27 +736,10 @@ Error RenderingContextDriverVulkan::_initialize_instance() {
 
 #ifdef USE_VOLK
 	volkLoadInstance(instance);
-#ifdef DEBUG_ENABLED
-	if (vkEnumerateDeviceExtensionProperties == nullptr) {
-		ERR_PRINT("volk: vkEnumerateDeviceExtensionProperties is null after volkLoadInstance; attempting manual load.");
-	}
-#endif
 	if (vkEnumerateDeviceExtensionProperties == nullptr) {
 		vkEnumerateDeviceExtensionProperties =
 				(PFN_vkEnumerateDeviceExtensionProperties)vkGetInstanceProcAddr(instance, "vkEnumerateDeviceExtensionProperties");
 	}
-#ifdef DEBUG_ENABLED
-	if (vkEnumerateDeviceExtensionProperties == nullptr) {
-		ERR_PRINT("volk: vkEnumerateDeviceExtensionProperties is still null after manual load.");
-	}
-	String volk_ptrs = "volk pointers: vkGetInstanceProcAddr=0x" +
-			String::num_uint64((uint64_t)vkGetInstanceProcAddr, 16) +
-			" vkGetDeviceProcAddr=0x" +
-			String::num_uint64((uint64_t)vkGetDeviceProcAddr, 16) +
-			" vkEnumerateDeviceExtensionProperties=0x" +
-			String::num_uint64((uint64_t)vkEnumerateDeviceExtensionProperties, 16);
-	ERR_PRINT(volk_ptrs);
-#endif
 #endif
 
 	// Physical device.

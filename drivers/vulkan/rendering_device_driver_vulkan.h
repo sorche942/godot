@@ -136,6 +136,13 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	bool buffer_device_address_support = false;
 	bool vulkan_memory_model_support = false;
 	bool vulkan_memory_model_device_scope_support = false;
+	bool descriptor_indexing_support = false;
+	bool descriptor_binding_partially_bound_support = false;
+	bool descriptor_binding_variable_descriptor_count_support = false;
+	bool runtime_descriptor_array_support = false;
+	bool shader_uniform_buffer_array_non_uniform_indexing_support = false;
+	bool shader_storage_buffer_array_non_uniform_indexing_support = false;
+	bool shader_sampled_image_array_non_uniform_indexing_support = false;
 	bool pipeline_cache_control_support = false;
 	bool device_fault_support = false;
 	bool framebuffer_depth_resolve = false;
@@ -715,6 +722,8 @@ public:
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override final;
 
 	virtual bool is_composite_alpha_supported(CommandQueueID p_queue) const override final;
+
+	VkCommandBuffer command_buffer_get_vk(CommandBufferID p_cmd_buffer) const;
 
 private:
 	/*********************/

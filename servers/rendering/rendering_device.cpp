@@ -7363,6 +7363,12 @@ uint64_t RenderingDevice::get_driver_resource(DriverResource p_resource, RID p_r
 	return driver->get_resource_native_handle(p_resource, driver_id);
 }
 
+RDD::CommandBufferID RenderingDevice::get_current_command_buffer() const {
+	ERR_RENDER_THREAD_GUARD_V(RDD::CommandBufferID());
+	ERR_FAIL_COND_V(frames.is_empty(), RDD::CommandBufferID());
+	return frames[frame].command_buffer;
+}
+
 String RenderingDevice::get_driver_and_device_memory_report() const {
 	return context->get_driver_and_device_memory_report();
 }

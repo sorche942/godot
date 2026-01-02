@@ -1722,6 +1722,7 @@ public:
 	bool is_composite_alpha_supported() const;
 
 	uint64_t get_driver_resource(DriverResource p_resource, RID p_rid = RID(), uint64_t p_index = 0);
+	RDD::CommandBufferID get_current_command_buffer() const;
 
 	String get_driver_and_device_memory_report() const;
 

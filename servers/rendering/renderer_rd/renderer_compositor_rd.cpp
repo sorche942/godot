@@ -165,6 +165,8 @@ void RendererCompositorRD::initialize() {
 uint64_t RendererCompositorRD::frame = 1;
 
 void RendererCompositorRD::finalize() {
+	brixelizerManager().shutdown();
+
 	memdelete(scene);
 	memdelete(canvas);
 	memdelete(fog);

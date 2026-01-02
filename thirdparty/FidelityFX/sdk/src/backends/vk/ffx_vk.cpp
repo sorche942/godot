@@ -30,7 +30,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <cstdio>
 #include <codecvt>  // this is deprecated so it's just a fallback solution
 #endif  // _WIN32
 
@@ -1514,66 +1513,6 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
         backendContext->vkFunctionTable.vkCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkCmdBeginDebugUtilsLabelEXT");
         backendContext->vkFunctionTable.vkCmdEndDebugUtilsLabelEXT = (PFN_vkCmdEndDebugUtilsLabelEXT)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkCmdEndDebugUtilsLabelEXT");
 
-#ifdef DEBUG_ENABLED
-        const struct {
-            const char *name;
-            const void *ptr;
-        } required_funcs[] = {
-            { "vkCreateBuffer", (const void *)backendContext->vkFunctionTable.vkCreateBuffer },
-            { "vkDestroyBuffer", (const void *)backendContext->vkFunctionTable.vkDestroyBuffer },
-            { "vkCreateImage", (const void *)backendContext->vkFunctionTable.vkCreateImage },
-            { "vkDestroyImage", (const void *)backendContext->vkFunctionTable.vkDestroyImage },
-            { "vkCreateImageView", (const void *)backendContext->vkFunctionTable.vkCreateImageView },
-            { "vkDestroyImageView", (const void *)backendContext->vkFunctionTable.vkDestroyImageView },
-            { "vkCreateSampler", (const void *)backendContext->vkFunctionTable.vkCreateSampler },
-            { "vkDestroySampler", (const void *)backendContext->vkFunctionTable.vkDestroySampler },
-            { "vkCreateShaderModule", (const void *)backendContext->vkFunctionTable.vkCreateShaderModule },
-            { "vkDestroyShaderModule", (const void *)backendContext->vkFunctionTable.vkDestroyShaderModule },
-            { "vkCreatePipelineLayout", (const void *)backendContext->vkFunctionTable.vkCreatePipelineLayout },
-            { "vkDestroyPipelineLayout", (const void *)backendContext->vkFunctionTable.vkDestroyPipelineLayout },
-            { "vkCreateComputePipelines", (const void *)backendContext->vkFunctionTable.vkCreateComputePipelines },
-            { "vkDestroyPipeline", (const void *)backendContext->vkFunctionTable.vkDestroyPipeline },
-            { "vkCreateDescriptorSetLayout", (const void *)backendContext->vkFunctionTable.vkCreateDescriptorSetLayout },
-            { "vkDestroyDescriptorSetLayout", (const void *)backendContext->vkFunctionTable.vkDestroyDescriptorSetLayout },
-            { "vkCreateDescriptorPool", (const void *)backendContext->vkFunctionTable.vkCreateDescriptorPool },
-            { "vkDestroyDescriptorPool", (const void *)backendContext->vkFunctionTable.vkDestroyDescriptorPool },
-            { "vkAllocateDescriptorSets", (const void *)backendContext->vkFunctionTable.vkAllocateDescriptorSets },
-            { "vkFreeDescriptorSets", (const void *)backendContext->vkFunctionTable.vkFreeDescriptorSets },
-            { "vkUpdateDescriptorSets", (const void *)backendContext->vkFunctionTable.vkUpdateDescriptorSets },
-            { "vkCmdPipelineBarrier", (const void *)backendContext->vkFunctionTable.vkCmdPipelineBarrier },
-            { "vkCmdBindPipeline", (const void *)backendContext->vkFunctionTable.vkCmdBindPipeline },
-            { "vkCmdBindDescriptorSets", (const void *)backendContext->vkFunctionTable.vkCmdBindDescriptorSets },
-            { "vkCmdDispatch", (const void *)backendContext->vkFunctionTable.vkCmdDispatch },
-            { "vkCmdDispatchIndirect", (const void *)backendContext->vkFunctionTable.vkCmdDispatchIndirect },
-            { "vkCmdCopyBuffer", (const void *)backendContext->vkFunctionTable.vkCmdCopyBuffer },
-            { "vkCmdCopyImage", (const void *)backendContext->vkFunctionTable.vkCmdCopyImage },
-            { "vkCmdCopyBufferToImage", (const void *)backendContext->vkFunctionTable.vkCmdCopyBufferToImage },
-            { "vkCmdClearColorImage", (const void *)backendContext->vkFunctionTable.vkCmdClearColorImage },
-            { "vkCmdFillBuffer", (const void *)backendContext->vkFunctionTable.vkCmdFillBuffer },
-            { "vkGetBufferMemoryRequirements", (const void *)backendContext->vkFunctionTable.vkGetBufferMemoryRequirements },
-            { "vkGetImageMemoryRequirements", (const void *)backendContext->vkFunctionTable.vkGetImageMemoryRequirements },
-            { "vkGetBufferMemoryRequirements2KHR", (const void *)backendContext->vkFunctionTable.vkGetBufferMemoryRequirements2KHR },
-            { "vkAllocateMemory", (const void *)backendContext->vkFunctionTable.vkAllocateMemory },
-            { "vkFreeMemory", (const void *)backendContext->vkFunctionTable.vkFreeMemory },
-            { "vkMapMemory", (const void *)backendContext->vkFunctionTable.vkMapMemory },
-            { "vkUnmapMemory", (const void *)backendContext->vkFunctionTable.vkUnmapMemory },
-            { "vkBindBufferMemory", (const void *)backendContext->vkFunctionTable.vkBindBufferMemory },
-            { "vkBindImageMemory", (const void *)backendContext->vkFunctionTable.vkBindImageMemory },
-            { "vkFlushMappedMemoryRanges", (const void *)backendContext->vkFunctionTable.vkFlushMappedMemoryRanges },
-        };
-
-        bool has_missing = false;
-        for (uint32_t i = 0; i < sizeof(required_funcs) / sizeof(required_funcs[0]); ++i) {
-            if (required_funcs[i].ptr == nullptr) {
-                has_missing = true;
-                fprintf(stderr, "FFX VK: missing device function %s\n", required_funcs[i].name);
-            }
-        }
-        if (has_missing) {
-            return FFX_ERROR_INCOMPLETE_INTERFACE;
-        }
-#endif
-
         // enumerate all the device extensions
         backendContext->numDeviceExtensions = 0;
         vkEnumerateDeviceExtensionProperties(backendContext->physicalDevice, nullptr, &backendContext->numDeviceExtensions, nullptr);
@@ -1593,7 +1532,7 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
         descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         descriptorPoolCreateInfo.pNext = nullptr;
         descriptorPoolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        descriptorPoolCreateInfo.poolSizeCount = 5;
+        descriptorPoolCreateInfo.poolSizeCount = 6;
         descriptorPoolCreateInfo.pPoolSizes = poolSizes;
         descriptorPoolCreateInfo.maxSets = backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * MAX_PIPELINE_USAGE_PER_FRAME * FFX_MAX_QUEUED_FRAMES;
 
@@ -1856,7 +1795,7 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
 
                 descriptorPoolCreateInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
                 descriptorPoolCreateInfo.pNext         = nullptr;
-                descriptorPoolCreateInfo.flags         = 0;
+                descriptorPoolCreateInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
                 descriptorPoolCreateInfo.poolSizeCount = poolSizeCount;
                 descriptorPoolCreateInfo.pPoolSizes    = poolSizes;
                 descriptorPoolCreateInfo.maxSets       = poolSizeCount;
