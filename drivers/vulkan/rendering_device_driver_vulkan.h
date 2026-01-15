@@ -45,6 +45,8 @@
 #include "thirdparty/vulkan/vk_mem_alloc.h"
 
 #include "drivers/vulkan/godot_vulkan.h"
+#include "Vulray/Vulray.h"
+#include "Vulray/VulrayDevice.h"
 
 // Design principles:
 // - Vulkan structs are zero-initialized and fields not requiring a non-zero value are omitted (except in cases where expresivity reasons apply).
@@ -114,6 +116,7 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	VkDebugReportObjectTypeEXT _convert_to_debug_report_objectType(VkObjectType p_object_type);
 
 	VkDevice vk_device = VK_NULL_HANDLE;
+	vr::VulrayDevice *vulray_device = nullptr;
 	RenderingContextDriverVulkan *context_driver = nullptr;
 	RenderingContextDriver::Device context_device = {};
 	uint32_t frame_count = 1;
@@ -659,6 +662,35 @@ public:
 
 	virtual PipelineID compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) override final;
 
+	/**********************************/
+	/**** ACCELERATION STRUCTURES ****/
+	/**********************************/
+
+private:
+	struct BLAS {
+		vr::BLASHandle handle;
+		vr::BLASBuildInfo build_info;
+		vr::AllocatedBuffer scratch_buffer;
+	};
+
+public:
+	virtual BLASID blas_create(VectorView<BLASGeometryInfo> p_geometries) override final;
+	virtual void blas_free(BLASID p_blas) override final;
+	virtual void command_build_blas(CommandBufferID p_cmd_buffer, BLASID p_blas) override final;
+
+private:
+	struct TLAS {
+		vr::TLASHandle handle;
+		vr::TLASBuildInfo build_info;
+		vr::AllocatedBuffer instance_buffer;
+		vr::AllocatedBuffer scratch_buffer;
+	};
+
+public:
+	virtual TLASID tlas_create(VectorView<TLASInstanceInfo> p_instances) override final;
+	virtual void tlas_free(TLASID p_tlas) override final;
+	virtual void command_build_tlas(CommandBufferID p_cmd_buffer, TLASID p_tlas) override final;
+
 	/*****************/
 	/**** QUERIES ****/
 	/*****************/
@@ -731,7 +763,9 @@ private:
 			ShaderInfo,
 			UniformSetInfo,
 			RenderPassInfo,
-			CommandBufferInfo>;
+			CommandBufferInfo,
+			BLAS,
+			TLAS>;
 	PagedAllocator<VersatileResource, true> resources_allocator;
 
 	/******************/

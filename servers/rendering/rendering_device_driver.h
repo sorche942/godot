@@ -140,6 +140,8 @@ public:
 	DEFINE_ID(QueryPool);
 	DEFINE_ID(Fence);
 	DEFINE_ID(Semaphore);
+	DEFINE_ID(BLAS);
+	DEFINE_ID(TLAS);
 
 public:
 	/*****************/
@@ -714,6 +716,42 @@ public:
 	// ----- PIPELINE -----
 
 	virtual PipelineID compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) = 0;
+
+	/**********************************/
+	/**** ACCELERATION STRUCTURES ****/
+	/**********************************/
+
+	struct BLASGeometryInfo {
+		BufferID vertex_buffer;
+		uint64_t vertex_offset = 0;
+		uint32_t vertex_stride = 0;
+		DataFormat vertex_format = DATA_FORMAT_MAX;
+		uint32_t vertex_count = 0;
+
+		BufferID index_buffer;
+		uint64_t index_offset = 0;
+		uint32_t index_count = 0;
+		// If index_count > 0, the format (16/32 bit) is inferred from this being non-zero? 
+		// Or we need an IndexType. Usually Godot uses 16 or 32 bit indices.
+		// Let's explicitly ask for it or use DataFormat. 
+		// Vulkan expects VkIndexType. Godot has DATA_FORMAT_R16_UINT / R32_UINT.
+		DataFormat index_format = DATA_FORMAT_MAX; 
+	};
+
+	virtual BLASID blas_create(VectorView<BLASGeometryInfo> p_geometries) = 0;
+	virtual void blas_free(BLASID p_blas) = 0;
+	virtual void command_build_blas(CommandBufferID p_cmd_buffer, BLASID p_blas) = 0;
+
+	struct TLASInstanceInfo {
+		BLASID blas;
+		Transform3D transform;
+		uint32_t instance_id = 0;
+		uint32_t instance_mask = 0xFF;
+	};
+
+	virtual TLASID tlas_create(VectorView<TLASInstanceInfo> p_instances) = 0;
+	virtual void tlas_free(TLASID p_tlas) = 0;
+	virtual void command_build_tlas(CommandBufferID p_cmd_buffer, TLASID p_tlas) = 0;
 
 	/******************/
 	/**** CALLBACK ****/

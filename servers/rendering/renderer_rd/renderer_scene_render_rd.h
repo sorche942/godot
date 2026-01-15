@@ -45,6 +45,7 @@
 #include "servers/rendering/renderer_rd/effects/vrs.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
+#include "servers/rendering/renderer_rd/environment/ray_tracing_manager_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
@@ -121,6 +122,7 @@ protected:
 
 	RendererRD::SkyRD sky;
 	RendererRD::GI gi;
+	RendererRD::RayTracingManager ray_tracing_manager;
 
 	virtual void _update_shader_quality_settings() {}
 	static bool _debug_draw_can_use_effects(RS::ViewportDebugDraw p_debug_draw);

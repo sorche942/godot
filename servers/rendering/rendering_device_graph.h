@@ -52,7 +52,9 @@ public:
 			TYPE_DISPATCH,
 			TYPE_DISPATCH_INDIRECT,
 			TYPE_SET_PUSH_CONSTANT,
-			TYPE_UNIFORM_SET_PREPARE_FOR_USE
+			TYPE_UNIFORM_SET_PREPARE_FOR_USE,
+			TYPE_BUILD_BLAS,
+			TYPE_BUILD_TLAS
 		};
 
 		Type type = TYPE_NONE;
@@ -671,6 +673,14 @@ private:
 		uint32_t set_index = 0;
 	};
 
+	struct ComputeListBuildBLASInstruction : ComputeListInstruction {
+		RDD::BLASID blas;
+	};
+
+	struct ComputeListBuildTLASInstruction : ComputeListInstruction {
+		RDD::TLASID tlas;
+	};
+
 	struct BarrierGroup {
 		BitField<RDD::PipelineStageBits> src_stages = {};
 		BitField<RDD::PipelineStageBits> dst_stages = {};
@@ -795,6 +805,8 @@ public:
 	void add_compute_list_dispatch_indirect(RDD::BufferID p_buffer, uint32_t p_offset);
 	void add_compute_list_set_push_constant(RDD::ShaderID p_shader, const void *p_data, uint32_t p_data_size);
 	void add_compute_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
+	void add_compute_list_build_blas(RDD::BLASID p_blas);
+	void add_compute_list_build_tlas(RDD::TLASID p_tlas);
 	void add_compute_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage);
 	void add_compute_list_usages(VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
 	void add_compute_list_end();

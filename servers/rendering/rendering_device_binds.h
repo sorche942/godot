@@ -728,3 +728,126 @@ protected:
 		ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "attachments", PROPERTY_HINT_ARRAY_TYPE, "RDPipelineColorBlendStateAttachment"), "set_attachments", "get_attachments");
 	}
 };
+
+class RDBLASGeometryInfo : public RefCounted {
+	GDCLASS(RDBLASGeometryInfo, RefCounted)
+
+public:
+	RID vertex_buffer;
+	uint64_t vertex_offset = 0;
+	uint32_t vertex_stride = 0;
+	RD::DataFormat vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
+	uint32_t vertex_count = 0;
+
+	RID index_buffer;
+	uint64_t index_offset = 0;
+	uint32_t index_count = 0;
+	RD::DataFormat index_format = RD::DATA_FORMAT_R32_UINT;
+
+	void set_vertex_buffer(RID p_buffer) { vertex_buffer = p_buffer; }
+	RID get_vertex_buffer() const { return vertex_buffer; }
+	
+	void set_vertex_offset(uint64_t p_offset) { vertex_offset = p_offset; }
+	uint64_t get_vertex_offset() const { return vertex_offset; }
+
+	void set_vertex_stride(uint32_t p_stride) { vertex_stride = p_stride; }
+	uint32_t get_vertex_stride() const { return vertex_stride; }
+
+	void set_vertex_format(RD::DataFormat p_format) { vertex_format = p_format; }
+	RD::DataFormat get_vertex_format() const { return vertex_format; }
+
+	void set_vertex_count(uint32_t p_count) { vertex_count = p_count; }
+	uint32_t get_vertex_count() const { return vertex_count; }
+
+	void set_index_buffer(RID p_buffer) { index_buffer = p_buffer; }
+	RID get_index_buffer() const { return index_buffer; }
+
+	void set_index_offset(uint64_t p_offset) { index_offset = p_offset; }
+	uint64_t get_index_offset() const { return index_offset; }
+
+	void set_index_count(uint32_t p_count) { index_count = p_count; }
+	uint32_t get_index_count() const { return index_count; }
+
+	void set_index_format(RD::DataFormat p_format) { index_format = p_format; }
+	RD::DataFormat get_index_format() const { return index_format; }
+
+protected:
+	static void _bind_methods() {
+		ClassDB::bind_method(D_METHOD("set_vertex_buffer", "vertex_buffer"), &RDBLASGeometryInfo::set_vertex_buffer);
+		ClassDB::bind_method(D_METHOD("get_vertex_buffer"), &RDBLASGeometryInfo::get_vertex_buffer);
+		ADD_PROPERTY(PropertyInfo(Variant::RID, "vertex_buffer"), "set_vertex_buffer", "get_vertex_buffer");
+
+		ClassDB::bind_method(D_METHOD("set_vertex_offset", "vertex_offset"), &RDBLASGeometryInfo::set_vertex_offset);
+		ClassDB::bind_method(D_METHOD("get_vertex_offset"), &RDBLASGeometryInfo::get_vertex_offset);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "vertex_offset"), "set_vertex_offset", "get_vertex_offset");
+
+		ClassDB::bind_method(D_METHOD("set_vertex_stride", "vertex_stride"), &RDBLASGeometryInfo::set_vertex_stride);
+		ClassDB::bind_method(D_METHOD("get_vertex_stride"), &RDBLASGeometryInfo::get_vertex_stride);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "vertex_stride"), "set_vertex_stride", "get_vertex_stride");
+
+		ClassDB::bind_method(D_METHOD("set_vertex_format", "vertex_format"), &RDBLASGeometryInfo::set_vertex_format);
+		ClassDB::bind_method(D_METHOD("get_vertex_format"), &RDBLASGeometryInfo::get_vertex_format);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "vertex_format", PROPERTY_HINT_ENUM, "R32G32B32_SFLOAT, ..."), "set_vertex_format", "get_vertex_format");
+
+		ClassDB::bind_method(D_METHOD("set_vertex_count", "vertex_count"), &RDBLASGeometryInfo::set_vertex_count);
+		ClassDB::bind_method(D_METHOD("get_vertex_count"), &RDBLASGeometryInfo::get_vertex_count);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "vertex_count"), "set_vertex_count", "get_vertex_count");
+
+		ClassDB::bind_method(D_METHOD("set_index_buffer", "index_buffer"), &RDBLASGeometryInfo::set_index_buffer);
+		ClassDB::bind_method(D_METHOD("get_index_buffer"), &RDBLASGeometryInfo::get_index_buffer);
+		ADD_PROPERTY(PropertyInfo(Variant::RID, "index_buffer"), "set_index_buffer", "get_index_buffer");
+
+		ClassDB::bind_method(D_METHOD("set_index_offset", "index_offset"), &RDBLASGeometryInfo::set_index_offset);
+		ClassDB::bind_method(D_METHOD("get_index_offset"), &RDBLASGeometryInfo::get_index_offset);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "index_offset"), "set_index_offset", "get_index_offset");
+
+		ClassDB::bind_method(D_METHOD("set_index_count", "index_count"), &RDBLASGeometryInfo::set_index_count);
+		ClassDB::bind_method(D_METHOD("get_index_count"), &RDBLASGeometryInfo::get_index_count);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "index_count"), "set_index_count", "get_index_count");
+
+		ClassDB::bind_method(D_METHOD("set_index_format", "index_format"), &RDBLASGeometryInfo::set_index_format);
+		ClassDB::bind_method(D_METHOD("get_index_format"), &RDBLASGeometryInfo::get_index_format);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "index_format"), "set_index_format", "get_index_format");
+	}
+};
+
+class RDTLASInstanceInfo : public RefCounted {
+	GDCLASS(RDTLASInstanceInfo, RefCounted)
+
+public:
+	RID blas;
+	Transform3D transform;
+	uint32_t instance_id = 0;
+	uint32_t instance_mask = 0xFF;
+
+	void set_blas(RID p_blas) { blas = p_blas; }
+	RID get_blas() const { return blas; }
+
+	void set_transform(const Transform3D &p_transform) { transform = p_transform; }
+	Transform3D get_transform() const { return transform; }
+
+	void set_instance_id(uint32_t p_id) { instance_id = p_id; }
+	uint32_t get_instance_id() const { return instance_id; }
+
+	void set_instance_mask(uint32_t p_mask) { instance_mask = p_mask; }
+	uint32_t get_instance_mask() const { return instance_mask; }
+
+protected:
+	static void _bind_methods() {
+		ClassDB::bind_method(D_METHOD("set_blas", "blas"), &RDTLASInstanceInfo::set_blas);
+		ClassDB::bind_method(D_METHOD("get_blas"), &RDTLASInstanceInfo::get_blas);
+		ADD_PROPERTY(PropertyInfo(Variant::RID, "blas"), "set_blas", "get_blas");
+
+		ClassDB::bind_method(D_METHOD("set_transform", "transform"), &RDTLASInstanceInfo::set_transform);
+		ClassDB::bind_method(D_METHOD("get_transform"), &RDTLASInstanceInfo::get_transform);
+		ADD_PROPERTY(PropertyInfo(Variant::TRANSFORM3D, "transform"), "set_transform", "get_transform");
+
+		ClassDB::bind_method(D_METHOD("set_instance_id", "instance_id"), &RDTLASInstanceInfo::set_instance_id);
+		ClassDB::bind_method(D_METHOD("get_instance_id"), &RDTLASInstanceInfo::get_instance_id);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "instance_id"), "set_instance_id", "get_instance_id");
+
+		ClassDB::bind_method(D_METHOD("set_instance_mask", "instance_mask"), &RDTLASInstanceInfo::set_instance_mask);
+		ClassDB::bind_method(D_METHOD("get_instance_mask"), &RDTLASInstanceInfo::get_instance_mask);
+		ADD_PROPERTY(PropertyInfo(Variant::INT, "instance_mask"), "set_instance_mask", "get_instance_mask");
+	}
+};

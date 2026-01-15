@@ -441,6 +441,21 @@ public:
 		return mesh->shadow_mesh;
 	}
 
+	_FORCE_INLINE_ RID mesh_surface_get_vertex_buffer(void *p_surface) {
+		Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return surface->vertex_buffer;
+	}
+
+	_FORCE_INLINE_ RID mesh_surface_get_index_buffer(void *p_surface) {
+		Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return surface->index_buffer;
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_index_count(void *p_surface) {
+		Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return surface->index_count;
+	}
+
 	_FORCE_INLINE_ RS::PrimitiveType mesh_surface_get_primitive(void *p_surface) {
 		Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
 		return surface->primitive;

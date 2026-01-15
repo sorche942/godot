@@ -797,6 +797,12 @@ uint64_t RenderingDevice::buffer_get_device_address(RID p_buffer) {
 	return driver->buffer_get_device_address(buffer->driver_id);
 }
 
+RDD::BufferID RenderingDevice::buffer_get_driver_id(RID p_buffer) {
+	ERR_RENDER_THREAD_GUARD_V(RDD::BufferID());
+	Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	return buffer ? buffer->driver_id : RDD::BufferID();
+}
+
 uint8_t *RenderingDevice::buffer_persistent_map_advance(RID p_buffer) {
 	ERR_RENDER_THREAD_GUARD_V(0);
 
@@ -3442,6 +3448,34 @@ RID RenderingDevice::index_array_create(RID p_index_buffer, uint32_t p_index_off
 	return id;
 }
 
+/**********************************/
+/**** ACCELERATION STRUCTURES ****/
+/**********************************/
+
+RID RenderingDevice::blas_create(const Vector<RDD::BLASGeometryInfo> &p_geometries) {
+	ERR_RENDER_THREAD_GUARD_V(RID());
+	BLAS *blas = memnew(BLAS);
+	blas->driver_id = driver->blas_create(p_geometries);
+	blas->geometries = p_geometries;
+	RID rid = blas_owner.make_rid(blas);
+	return rid;
+}
+
+RDD::BLASID RenderingDevice::blas_get_driver_id(RID p_blas) {
+	ERR_RENDER_THREAD_GUARD_V(RDD::BLASID());
+	BLAS *blas = blas_owner.get_or_null(p_blas);
+	return blas ? blas->driver_id : RDD::BLASID();
+}
+
+RID RenderingDevice::tlas_create(const Vector<RDD::TLASInstanceInfo> &p_instances) {
+	ERR_RENDER_THREAD_GUARD_V(RID());
+	TLAS *tlas = memnew(TLAS);
+	tlas->driver_id = driver->tlas_create(p_instances);
+	tlas->instances = p_instances;
+	RID rid = tlas_owner.make_rid(tlas);
+	return rid;
+}
+
 /****************/
 /**** SHADER ****/
 /****************/
@@ -5775,12 +5809,28 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 
 	draw_graph.add_compute_list_dispatch_indirect(buffer->driver_id, p_offset);
 	compute_list.state.dispatch_count++;
+} 
 
-	if (buffer->draw_tracker != nullptr) {
-		draw_graph.add_compute_list_usage(buffer->draw_tracker, RDG::RESOURCE_USAGE_INDIRECT_BUFFER_READ);
-	}
+void RenderingDevice::compute_list_build_blas(ComputeListID p_list, RID p_blas) {
+	ERR_RENDER_THREAD_GUARD();
+	ERR_FAIL_COND(p_list != ID_TYPE_COMPUTE_LIST);
+	ERR_FAIL_COND(!compute_list.active);
 
-	_check_transfer_worker_buffer(buffer);
+	BLAS *blas = blas_owner.get_or_null(p_blas);
+	ERR_FAIL_NULL(blas);
+
+	draw_graph.add_compute_list_build_blas(blas->driver_id);
+}
+
+void RenderingDevice::compute_list_build_tlas(ComputeListID p_list, RID p_tlas) {
+	ERR_RENDER_THREAD_GUARD();
+	ERR_FAIL_COND(p_list != ID_TYPE_COMPUTE_LIST);
+	ERR_FAIL_COND(!compute_list.active);
+
+	TLAS *tlas = tlas_owner.get_or_null(p_tlas);
+	ERR_FAIL_NULL(tlas);
+
+	draw_graph.add_compute_list_build_tlas(tlas->driver_id);
 }
 
 void RenderingDevice::compute_list_add_barrier(ComputeListID p_list) {
@@ -6373,6 +6423,16 @@ void RenderingDevice::_free_internal(RID p_id) {
 		index_buffer_owner.free(p_id);
 	} else if (index_array_owner.owns(p_id)) {
 		index_array_owner.free(p_id);
+	} else if (blas_owner.owns(p_id)) {
+		BLAS *blas = blas_owner.get_or_null(p_id);
+		driver->blas_free(blas->driver_id);
+		blas_owner.free(p_id);
+		memdelete(blas);
+	} else if (tlas_owner.owns(p_id)) {
+		TLAS *tlas = tlas_owner.get_or_null(p_id);
+		driver->tlas_free(tlas->driver_id);
+		tlas_owner.free(p_id);
+		memdelete(tlas);
 	} else if (shader_owner.owns(p_id)) {
 		Shader *shader = shader_owner.get_or_null(p_id);
 		if (shader->driver_id) { // Not placeholder?

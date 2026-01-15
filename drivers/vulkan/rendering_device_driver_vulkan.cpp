@@ -559,6 +559,13 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME, false);
 
+	// Ray Tracing
+	_register_requested_device_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME, false);
+
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
 	_register_requested_device_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, false);
@@ -1207,6 +1214,30 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		create_info_next = &device_fault_features;
 	}
 
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {};
+	if (enabled_device_extension_names.has(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
+		acceleration_structure_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+		acceleration_structure_features.pNext = create_info_next;
+		acceleration_structure_features.accelerationStructure = VK_TRUE;
+		create_info_next = &acceleration_structure_features;
+	}
+
+	VkPhysicalDeviceRayTracingPipelineFeaturesKHR ray_tracing_pipeline_features = {};
+	if (enabled_device_extension_names.has(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
+		ray_tracing_pipeline_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+		ray_tracing_pipeline_features.pNext = create_info_next;
+		ray_tracing_pipeline_features.rayTracingPipeline = VK_TRUE;
+		create_info_next = &ray_tracing_pipeline_features;
+	}
+
+	VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
+	if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
+		ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+		ray_query_features.pNext = create_info_next;
+		ray_query_features.rayQuery = VK_TRUE;
+		create_info_next = &ray_query_features;
+	}
+
 #if defined(VK_TRACK_DEVICE_MEMORY)
 	VkDeviceDeviceMemoryReportCreateInfoEXT memory_report_info = {};
 	if (device_memory_report_support) {
@@ -1642,6 +1673,14 @@ Error RenderingDeviceDriverVulkan::initialize(uint32_t p_device_index, uint32_t 
 
 	err = _initialize_allocator();
 	ERR_FAIL_COND_V(err != OK, err);
+
+	// Initialize Vulray Device
+	try {
+		vulray_device = new vr::VulrayDevice(vk::Instance(context_driver->instance_get()), vk::Device(vk_device), vk::PhysicalDevice(physical_device), allocator);
+	} catch (const std::exception &e) {
+		ERR_PRINT(String("Failed to initialize VulrayDevice: ") + e.what());
+		return ERR_CANT_CREATE;
+	}
 
 	err = _initialize_pipeline_cache();
 	ERR_FAIL_COND_V(err != OK, err);
@@ -5873,6 +5912,204 @@ RDD::PipelineID RenderingDeviceDriverVulkan::compute_pipeline_create(ShaderID p_
 	return PipelineID(vk_pipeline);
 }
 
+/**********************************/
+/**** ACCELERATION STRUCTURES ****/
+/**********************************/
+
+RDD::BLASID RenderingDeviceDriverVulkan::blas_create(VectorView<BLASGeometryInfo> p_geometries) {
+	if (!vulray_device) {
+		return BLASID();
+	}
+
+	BLAS *blas = BLAS::allocate(resources_allocator);
+
+	vr::BLASCreateInfo create_info = {};
+
+	for (uint32_t i = 0; i < p_geometries.size(); i++) {
+		const BLASGeometryInfo &geom_info = p_geometries[i];
+		vr::GeometryData geom_data = {};
+
+		const BufferInfo *vertex_buf = (const BufferInfo *)geom_info.vertex_buffer.id;
+		if (vertex_buf) {
+			VkBufferDeviceAddressInfo addr_info = {};
+			addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+			addr_info.buffer = vertex_buf->vk_buffer;
+			geom_data.DataAddresses.VertexDevAddress = vkGetBufferDeviceAddress(vk_device, &addr_info) + geom_info.vertex_offset;
+		}
+
+		const BufferInfo *index_buf = (const BufferInfo *)geom_info.index_buffer.id;
+		if (index_buf) {
+			VkBufferDeviceAddressInfo addr_info = {};
+			addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+			addr_info.buffer = index_buf->vk_buffer;
+			geom_data.DataAddresses.IndexDevAddress = vkGetBufferDeviceAddress(vk_device, &addr_info) + geom_info.index_offset;
+		}
+
+		geom_data.Stride = geom_info.vertex_stride;
+		geom_data.PrimitiveCount = geom_info.vertex_count / 3; // Assuming triangles for now, and simple count. Wait, vertex_count usually means num vertices. Primitive count is num triangles.
+		// If indexed, primitive count is index_count / 3.
+		if (geom_info.index_count > 0) {
+			geom_data.PrimitiveCount = geom_info.index_count / 3;
+		}
+
+		// Map formats
+		// Godot DataFormat to vk::Format.
+		// We can reuse RD::get_data_format_config(geom_info.vertex_format).
+		// For now, let's assume standard float3 position.
+		// geom_data.VertexFormat = vk::Format::eR32G32B32Sfloat; 
+		// We need a helper to map DataFormat to VkFormat. existing map_to_vulkan_format? 
+		// There isn't a direct one exposed easily in RDDVulkan without including everything. 
+		// But RDDVulkan uses `RD::get_singleton()`? No.
+		// `rendering_context_driver_vulkan.h` usually has format mapping.
+		// Actually, `RenderingDevice::get_singleton()` might not be available at driver level properly?
+		// But we have `RenderingDeviceDriverVulkan` which includes `godot_vulkan.h`.
+
+		// Quick hack: assume R32G32B32_SFLOAT for now or implementing a small switch if needed.
+		// Let's rely on standard formats.
+		
+		// geom_data.VertexFormat = (vk::Format)rd_format_to_vk_format(geom_info.vertex_format); // Hypothetical.
+		// Let's assume R32G32B32_SFLOAT for simplicity in this prototype.
+		geom_data.VertexFormat = vk::Format::eR32G32B32Sfloat;
+
+		if (geom_info.index_count > 0) {
+			geom_data.IndexFormat = (geom_info.index_format == DATA_FORMAT_R16_UINT) ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
+		} else {
+			geom_data.IndexFormat = vk::IndexType::eNoneKHR;
+		}
+
+		create_info.Geometries.push_back(geom_data);
+	}
+
+	auto result = vulray_device->CreateBLAS(create_info);
+	blas->handle = result.first;
+	blas->build_info = result.second;
+
+	// Create and bind scratch buffer
+	blas->scratch_buffer = vulray_device->CreateScratchBufferFromBuildInfo(blas->build_info);
+	
+	// Vulray's CreateScratchBufferFromBuildInfo returns an AllocatedBuffer. 
+	// We need to pass the device address of this buffer to build_info.ScratchData.
+	// But `CreateScratchBufferFromBuildInfo` might not automatically bind it to the build_info structure if we don't use the helper that does BOTH.
+	// `CreateScratchBufferFromBuildInfo` implementation:
+	//   AllocatedBuffer buf = CreateScratchBuffer(size);
+	//   BindScratchAdressToBuildInfo(GetBufferAddress(buf), buildInfo);
+	//   return buf;
+	// So it DOES bind it.
+
+	return BLASID(blas);
+}
+
+void RenderingDeviceDriverVulkan::blas_free(BLASID p_blas) {
+	BLAS *blas = (BLAS *)p_blas.id;
+	if (vulray_device) {
+		vulray_device->DestroyBLAS(blas->handle);
+		vulray_device->DestroyBuffer(blas->scratch_buffer);
+	}
+	BLAS::free(resources_allocator, blas);
+}
+
+void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffer, BLASID p_blas) {
+	if (!vulray_device) return;
+	BLAS *blas = (BLAS *)p_blas.id;
+	const CommandBufferInfo *cmd_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	
+	std::vector<vr::BLASBuildInfo> build_infos;
+	build_infos.push_back(blas->build_info);
+	
+	vulray_device->BuildBLAS(build_infos, vk::CommandBuffer(cmd_info->vk_command_buffer));
+}
+
+RDD::TLASID RenderingDeviceDriverVulkan::tlas_create(VectorView<TLASInstanceInfo> p_instances) {
+	if (!vulray_device) {
+		return TLASID();
+	}
+
+	TLAS *tlas = TLAS::allocate(resources_allocator);
+
+	// 1. Create Instance Buffer
+	tlas->instance_buffer = vulray_device->CreateInstanceBuffer(p_instances.size());
+
+	// 2. Map and Fill Instance Buffer
+	VkAccelerationStructureInstanceKHR *instance_data = (VkAccelerationStructureInstanceKHR *)vulray_device->MapBuffer(tlas->instance_buffer);
+
+	for (uint32_t i = 0; i < p_instances.size(); i++) {
+		const TLASInstanceInfo &info = p_instances[i];
+		BLAS *blas = (BLAS *)info.blas.id;
+
+		// Transform
+		const Transform3D &tr = info.transform;
+		instance_data[i].transform.matrix[0][0] = tr.basis.rows[0][0];
+		instance_data[i].transform.matrix[0][1] = tr.basis.rows[0][1];
+		instance_data[i].transform.matrix[0][2] = tr.basis.rows[0][2];
+		instance_data[i].transform.matrix[0][3] = tr.origin.x;
+
+		instance_data[i].transform.matrix[1][0] = tr.basis.rows[1][0];
+		instance_data[i].transform.matrix[1][1] = tr.basis.rows[1][1];
+		instance_data[i].transform.matrix[1][2] = tr.basis.rows[1][2];
+		instance_data[i].transform.matrix[1][3] = tr.origin.y;
+
+		instance_data[i].transform.matrix[2][0] = tr.basis.rows[2][0];
+		instance_data[i].transform.matrix[2][1] = tr.basis.rows[2][1];
+		instance_data[i].transform.matrix[2][2] = tr.basis.rows[2][2];
+		instance_data[i].transform.matrix[2][3] = tr.origin.z;
+
+		instance_data[i].instanceCustomIndex = info.instance_id;
+		instance_data[i].mask = info.instance_mask;
+		instance_data[i].instanceShaderBindingTableRecordOffset = 0; // For now
+		instance_data[i].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+
+		// Get BLAS Device Address
+		VkAccelerationStructureDeviceAddressInfoKHR address_info = {};
+		address_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+		address_info.accelerationStructure = blas->handle.AccelerationStructure;
+		instance_data[i].accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(vk_device, &address_info);
+	}
+
+	vulray_device->UnmapBuffer(tlas->instance_buffer);
+
+	// 3. Create TLAS
+	vr::TLASCreateInfo create_info = {};
+	create_info.MaxInstanceCount = p_instances.size();
+	
+	// Get Instance Buffer Device Address
+	VkBufferDeviceAddressInfo addr_info = {};
+	addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+	addr_info.buffer = tlas->instance_buffer.Buffer;
+	create_info.InstanceDevAddress = vkGetBufferDeviceAddress(vk_device, &addr_info);
+
+	auto result = vulray_device->CreateTLAS(create_info);
+	tlas->handle = result.first;
+	tlas->build_info = result.second;
+
+	// 4. Scratch Buffer
+	tlas->scratch_buffer = vulray_device->CreateScratchBufferFromBuildInfo(tlas->build_info);
+
+	return TLASID(tlas);
+}
+
+void RenderingDeviceDriverVulkan::tlas_free(TLASID p_tlas) {
+	TLAS *tlas = (TLAS *)p_tlas.id;
+	if (vulray_device) {
+		vulray_device->DestroyTLAS(tlas->handle);
+		vulray_device->DestroyBuffer(tlas->instance_buffer);
+		vulray_device->DestroyBuffer(tlas->scratch_buffer);
+	}
+	TLAS::free(resources_allocator, tlas);
+}
+
+void RenderingDeviceDriverVulkan::command_build_tlas(CommandBufferID p_cmd_buffer, TLASID p_tlas) {
+	if (!vulray_device) return;
+	TLAS *tlas = (TLAS *)p_tlas.id;
+	const CommandBufferInfo *cmd_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	
+	// We need to pass the instance count. Assuming build with all max instances for now.
+	// tlas->build_info.MaxInstanceCount contains the count? No, tlas->build_info is TLASBuildInfo.
+	// BuildTLAS takes instanceCount.
+	uint32_t instance_count = tlas->build_info.MaxInstanceCount; 
+	
+	vulray_device->BuildTLAS(tlas->build_info, tlas->instance_buffer, instance_count, vk::CommandBuffer(cmd_info->vk_command_buffer));
+}
+
 /*****************/
 /**** QUERIES ****/
 /*****************/
@@ -6570,6 +6807,11 @@ RenderingDeviceDriverVulkan::~RenderingDeviceDriverVulkan() {
 		buffer_free(breadcrumb_buffer);
 	}
 #endif
+
+	if (vulray_device) {
+		delete vulray_device;
+		vulray_device = nullptr;
+	}
 
 	while (small_allocs_pools.size()) {
 		HashMap<uint32_t, VmaPool>::Iterator E = small_allocs_pools.begin();

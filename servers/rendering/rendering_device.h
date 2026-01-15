@@ -55,6 +55,8 @@ class RDPipelineDepthStencilState;
 class RDPipelineColorBlendState;
 class RDFramebufferPass;
 class RDPipelineSpecializationConstant;
+class RDBLASGeometryInfo;
+class RDTLASInstanceInfo;
 
 class RenderingDevice : public RenderingDeviceCommons {
 	GDCLASS(RenderingDevice, Object)
@@ -103,6 +105,8 @@ public:
 		ID_TYPE_VERTEX_FORMAT,
 		ID_TYPE_DRAW_LIST,
 		ID_TYPE_COMPUTE_LIST = 4,
+		ID_TYPE_BLAS,
+		ID_TYPE_TLAS,
 		ID_TYPE_MAX,
 		ID_BASE_SHIFT = 58, // 5 bits for ID types.
 		ID_MASK = (ID_BASE_SHIFT - 1),
@@ -255,6 +259,7 @@ public:
 	Vector<uint8_t> buffer_get_data(RID p_buffer, uint32_t p_offset = 0, uint32_t p_size = 0); // This causes stall, only use to retrieve large buffers for saving.
 	Error buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset = 0, uint32_t p_size = 0);
 	uint64_t buffer_get_device_address(RID p_buffer);
+	RDD::BufferID buffer_get_driver_id(RID p_buffer);
 	uint8_t *buffer_persistent_map_advance(RID p_buffer);
 	void buffer_flush(RID p_buffer);
 
@@ -836,6 +841,20 @@ private:
 
 	RID_Owner<IndexArray, true> index_array_owner;
 
+	struct BLAS {
+		RDD::BLASID driver_id;
+		Vector<RDD::BLASGeometryInfo> geometries; // Stored for validation/retrieval if needed.
+	};
+
+	RID_Owner<BLAS, true> blas_owner;
+
+	struct TLAS {
+		RDD::TLASID driver_id;
+		Vector<RDD::TLASInstanceInfo> instances;
+	};
+
+	RID_Owner<TLAS, true> tlas_owner;
+
 public:
 	enum BufferCreationBits {
 		BUFFER_CREATION_DEVICE_ADDRESS_BIT = (1 << 0),
@@ -862,6 +881,14 @@ public:
 	}
 
 	RID index_array_create(RID p_index_buffer, uint32_t p_index_offset, uint32_t p_index_count);
+
+	/**********************************/
+	/**** ACCELERATION STRUCTURES ****/
+	/**********************************/
+
+	RID blas_create(const Vector<RDD::BLASGeometryInfo> &p_geometries);
+	RDD::BLASID blas_get_driver_id(RID p_blas);
+	RID tlas_create(const Vector<RDD::TLASInstanceInfo> &p_instances);
 
 	/****************/
 	/**** SHADER ****/
@@ -1453,6 +1480,8 @@ public:
 	void compute_list_dispatch(ComputeListID p_list, uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups);
 	void compute_list_dispatch_threads(ComputeListID p_list, uint32_t p_x_threads, uint32_t p_y_threads, uint32_t p_z_threads);
 	void compute_list_dispatch_indirect(ComputeListID p_list, RID p_buffer, uint32_t p_offset);
+	void compute_list_build_blas(ComputeListID p_list, RID p_blas);
+	void compute_list_build_tlas(ComputeListID p_list, RID p_tlas);
 	void compute_list_add_barrier(ComputeListID p_list);
 
 	void compute_list_end();
@@ -1778,6 +1807,9 @@ private:
 
 	RID _render_pipeline_create(RID p_shader, FramebufferFormatID p_framebuffer_format, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, const Ref<RDPipelineRasterizationState> &p_rasterization_state, const Ref<RDPipelineMultisampleState> &p_multisample_state, const Ref<RDPipelineDepthStencilState> &p_depth_stencil_state, const Ref<RDPipelineColorBlendState> &p_blend_state, BitField<PipelineDynamicStateFlags> p_dynamic_state_flags, uint32_t p_for_render_pass, const TypedArray<RDPipelineSpecializationConstant> &p_specialization_constants);
 	RID _compute_pipeline_create(RID p_shader, const TypedArray<RDPipelineSpecializationConstant> &p_specialization_constants);
+
+	RID _blas_create(const TypedArray<RDBLASGeometryInfo> &p_geometries);
+	RID _tlas_create(const TypedArray<RDTLASInstanceInfo> &p_instances);
 
 	void _draw_list_set_push_constant(DrawListID p_list, const Vector<uint8_t> &p_data, uint32_t p_data_size);
 	void _compute_list_set_push_constant(ComputeListID p_list, const Vector<uint8_t> &p_data, uint32_t p_data_size);
