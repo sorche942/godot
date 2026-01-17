@@ -2269,12 +2269,17 @@ id<MTLDepthStencilState> MDResourceCache::get_depth_stencil_state(bool p_use_dep
 	return *val;
 }
 
-static const char *SHADER_STAGE_NAMES[] = {
+static const char *SHADER_STAGE_NAMES[RD::SHADER_STAGE_MAX] = {
 	[RD::SHADER_STAGE_VERTEX] = "vert",
 	[RD::SHADER_STAGE_FRAGMENT] = "frag",
 	[RD::SHADER_STAGE_TESSELATION_CONTROL] = "tess_ctrl",
 	[RD::SHADER_STAGE_TESSELATION_EVALUATION] = "tess_eval",
 	[RD::SHADER_STAGE_COMPUTE] = "comp",
+	[RD::SHADER_STAGE_RAYGEN] = "raygen",
+	[RD::SHADER_STAGE_ANY_HIT] = "any_hit",
+	[RD::SHADER_STAGE_CLOSEST_HIT] = "closest_hit",
+	[RD::SHADER_STAGE_MISS] = "miss",
+	[RD::SHADER_STAGE_INTERSECTION] = "intersection",
 };
 
 void ShaderCacheEntry::notify_free() const {

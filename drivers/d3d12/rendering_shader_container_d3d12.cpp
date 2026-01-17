@@ -379,6 +379,7 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 	// Translate SPIR-V to NIR.
 	for (uint64_t i = 0; i < p_spirv.size(); i++) {
 		RenderingDeviceCommons::ShaderStage stage = p_spirv[i].shader_stage;
+		ERR_FAIL_COND_V_MSG(stage > RenderingDeviceCommons::SHADER_STAGE_COMPUTE, false, "Ray tracing shader stages are not supported by the D3D12 driver.");
 		RenderingDeviceCommons::ShaderStage stage_flag = (RenderingDeviceCommons::ShaderStage)(1 << stage);
 		r_stages.push_back(stage);
 		r_stages_processed.set_flag(stage_flag);

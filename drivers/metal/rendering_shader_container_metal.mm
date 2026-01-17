@@ -223,6 +223,11 @@ static spv::ExecutionModel SHADER_STAGE_REMAP[RDD::SHADER_STAGE_MAX] = {
 	[RDD::SHADER_STAGE_TESSELATION_CONTROL] = spv::ExecutionModelTessellationControl,
 	[RDD::SHADER_STAGE_TESSELATION_EVALUATION] = spv::ExecutionModelTessellationEvaluation,
 	[RDD::SHADER_STAGE_COMPUTE] = spv::ExecutionModelGLCompute,
+	[RDD::SHADER_STAGE_RAYGEN] = spv::ExecutionModelMax,
+	[RDD::SHADER_STAGE_ANY_HIT] = spv::ExecutionModelMax,
+	[RDD::SHADER_STAGE_CLOSEST_HIT] = spv::ExecutionModelMax,
+	[RDD::SHADER_STAGE_MISS] = spv::ExecutionModelMax,
+	[RDD::SHADER_STAGE_INTERSECTION] = spv::ExecutionModelMax,
 };
 
 spv::ExecutionModel get_stage(uint32_t p_stages_mask, RDD::ShaderStage p_stage) {
@@ -548,6 +553,7 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 		StageData &stage_data = mtl_shaders.write[i];
 		const ReflectShaderStage &v = p_spirv[i];
 		RD::ShaderStage stage = v.shader_stage;
+		ERR_FAIL_COND_V_MSG(stage > RD::SHADER_STAGE_COMPUTE, false, "Ray tracing shader stages are not supported by the Metal driver.");
 		Span<uint32_t> spirv = v.spirv();
 		Parser parser(spirv.ptr(), spirv.size());
 		try {
