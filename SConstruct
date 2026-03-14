@@ -200,6 +200,7 @@ opts.Add(BoolVariable("d3d12", "Enable the Direct3D 12 rendering driver on suppo
 opts.Add(BoolVariable("metal", "Enable the Metal rendering driver on supported platforms (Apple arm64 only)", False))
 opts.Add(BoolVariable("use_volk", "Use the volk library to load the Vulkan loader dynamically", True))
 opts.Add(BoolVariable("use_streamline", "Enable Streamline support", True))
+opts.Add(BoolVariable("use_dlss_ngx", "Enable native NGX-based DLSS support", True))
 opts.Add(BoolVariable("accesskit", "Use AccessKit C SDK", True))
 opts.Add(("accesskit_sdk_path", "Path to the AccessKit C SDK", ""))
 opts.Add(BoolVariable("sdl", "Enable the SDL3 input driver", True))
@@ -592,9 +593,21 @@ if env["precision"] == "double":
 
 if env["use_streamline"]:
     if env["platform"] == "windows":
-        env.AppendUnique(CPPDEFINES=["STREAMLINE_ENABLED"])
+        env.AppendUnique(CPPDEFINES=["STREAMLINE_ENABLED", "DLSS_STREAMLINE_ENABLED"])
     else:
         env["use_streamline"] = False
+
+if env["use_dlss_ngx"]:
+    if env["platform"] == "linuxbsd" and env.Dir("#references/DLSS/include").exists() and env.File("#references/DLSS/lib/Linux_x86_64/libnvsdk_ngx.a").exists():
+        env.AppendUnique(CPPDEFINES=["DLSS_NGX_ENABLED"])
+        env.Prepend(CPPPATH=["#references/DLSS/include", "#thirdparty/vulkan", "#thirdparty/vulkan/include"])
+        env.Prepend(LIBPATH=["#references/DLSS/lib/Linux_x86_64"])
+        env.AppendUnique(LIBS=["nvsdk_ngx"])
+    else:
+        env["use_dlss_ngx"] = False
+
+if env["use_streamline"] or env["use_dlss_ngx"]:
+    env.AppendUnique(CPPDEFINES=["DLSS_ENABLED"])
 
 # Library Support
 if env["library_type"] != "executable":

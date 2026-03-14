@@ -592,6 +592,12 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME, false);
+#ifdef DLSS_NGX_ENABLED
+	_register_requested_device_extension(VK_NVX_BINARY_IMPORT_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, false);
+#endif
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -834,6 +840,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceMultiviewFeatures multiview_features = {};
 		VkPhysicalDevicePipelineCreationCacheControlFeatures pipeline_cache_control_features = {};
 		VkPhysicalDeviceVulkanMemoryModelFeatures memory_model_features = {};
+		VkPhysicalDeviceBufferDeviceAddressFeaturesEXT buffer_device_address_features_ext = {};
 		VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {};
 		VkPhysicalDeviceRayTracingPipelineFeaturesKHR raytracing_pipeline_features = {};
 		VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features = {};
@@ -854,6 +861,11 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				buffer_device_address_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
 				buffer_device_address_features.pNext = next_features;
 				next_features = &buffer_device_address_features;
+			}
+			if (enabled_device_extension_names.has(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+				buffer_device_address_features_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT;
+				buffer_device_address_features_ext.pNext = next_features;
+				next_features = &buffer_device_address_features_ext;
 			}
 			if (enabled_device_extension_names.has(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME)) {
 				vulkan_memory_model_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR;
@@ -960,6 +972,9 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			}
 			if (enabled_device_extension_names.has(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
 				buffer_device_address_support = buffer_device_address_features.bufferDeviceAddress;
+			}
+			if (enabled_device_extension_names.has(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+				buffer_device_address_support = buffer_device_address_features_ext.bufferDeviceAddress;
 			}
 			if (enabled_device_extension_names.has(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME)) {
 				vulkan_memory_model_support = vulkan_memory_model_features.vulkanMemoryModel;
@@ -1285,6 +1300,13 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		buffer_device_address_features.pNext = create_info_next;
 		buffer_device_address_features.bufferDeviceAddress = buffer_device_address_support;
 		create_info_next = &buffer_device_address_features;
+	}
+	VkPhysicalDeviceBufferDeviceAddressFeaturesEXT buffer_device_address_features_ext = {};
+	if (buffer_device_address_support && enabled_device_extension_names.has(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+		buffer_device_address_features_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT;
+		buffer_device_address_features_ext.pNext = create_info_next;
+		buffer_device_address_features_ext.bufferDeviceAddress = buffer_device_address_support;
+		create_info_next = &buffer_device_address_features_ext;
 	}
 
 	VkPhysicalDeviceVulkanMemoryModelFeaturesKHR vulkan_memory_model_features = {};
@@ -7306,6 +7328,26 @@ uint64_t RenderingDeviceDriverVulkan::get_resource_native_handle(DriverResource 
 			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
 			return (uint64_t)tex_info->vk_view;
 		}
+		case DRIVER_RESOURCE_TEXTURE_VIEW_ASPECT_MASK: {
+			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
+			return (uint64_t)tex_info->vk_view_create_info.subresourceRange.aspectMask;
+		}
+		case DRIVER_RESOURCE_TEXTURE_VIEW_BASE_MIPMAP: {
+			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
+			return (uint64_t)tex_info->vk_view_create_info.subresourceRange.baseMipLevel;
+		}
+		case DRIVER_RESOURCE_TEXTURE_VIEW_MIPMAP_COUNT: {
+			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
+			return (uint64_t)tex_info->vk_view_create_info.subresourceRange.levelCount;
+		}
+		case DRIVER_RESOURCE_TEXTURE_VIEW_BASE_LAYER: {
+			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
+			return (uint64_t)tex_info->vk_view_create_info.subresourceRange.baseArrayLayer;
+		}
+		case DRIVER_RESOURCE_TEXTURE_VIEW_LAYER_COUNT: {
+			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
+			return (uint64_t)tex_info->vk_view_create_info.subresourceRange.layerCount;
+		}
 		case DRIVER_RESOURCE_TEXTURE_DATA_FORMAT: {
 			const TextureInfo *tex_info = (const TextureInfo *)p_driver_id.id;
 			return (uint64_t)tex_info->vk_view_create_info.format;
@@ -7320,10 +7362,13 @@ uint64_t RenderingDeviceDriverVulkan::get_resource_native_handle(DriverResource 
 		} break;
 		case DRIVER_RESOURCE_SAMPLER:
 		case DRIVER_RESOURCE_UNIFORM_SET:
-		case DRIVER_RESOURCE_BUFFER:
 		case DRIVER_RESOURCE_COMPUTE_PIPELINE:
 		case DRIVER_RESOURCE_RENDER_PIPELINE: {
 			return p_driver_id.id;
+		}
+		case DRIVER_RESOURCE_BUFFER: {
+			const BufferInfo *buf_info = (const BufferInfo *)p_driver_id.id;
+			return (uint64_t)buf_info->vk_buffer;
 		}
 		default: {
 			return 0;

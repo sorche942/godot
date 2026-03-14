@@ -30,160 +30,65 @@
 
 #include "dlss.h"
 
-#include "../storage_rd/material_storage.h"
 #include "../uniform_set_cache_rd.h"
+#include "core/io/dir_access.h"
+#include "core/os/os.h"
+#include "core/version.h"
+#include <stdio.h>
 
-#ifdef STREAMLINE_ENABLED
-#define ENABLE_DLSS 1
+#ifdef DLSS_STREAMLINE_ENABLED
+#include "drivers/streamline/streamline_context.h"
 #endif
 
-#ifdef ENABLE_DLSS
-#include "drivers/streamline/streamline_context.h"
+#ifdef DLSS_NGX_ENABLED
+#include "drivers/vulkan/godot_vulkan.h"
+#include "nvsdk_ngx_helpers.h"
+#include "nvsdk_ngx_helpers_dlssd.h"
+#include "nvsdk_ngx_helpers_vk.h"
+#include "nvsdk_ngx_helpers_dlssd_vk.h"
 #endif
 
 using namespace RendererRD;
 
-#ifdef ENABLE_DLSS
+#ifdef DLSS_ENABLED
 
-// Texture layout/state constants (avoid including Vulkan/D3D12 headers here).
+// Texture layout/state constants (avoid including backend-specific state headers here).
 static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY = 5;
 static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR = 0x40;
 static constexpr float DLSS_OPTIMAL_MODE_MAX_DISTANCE = 1000000.0f;
-namespace RendererRD {
-class DLSSContextInner : public DLSSContext {
-public:
-	sl::ViewportHandle viewport;
-	sl::Constants constants;
-	sl::DLSSOptions currentDlssOptions;
-	sl::DLSSOptimalSettings currentOptimalSettings;
-	sl::DLSSDOptions currentDlssDOptions; // DLSS Ray Reconstruction options
 
-	DLSSContextInner();
-	virtual ~DLSSContextInner();
+namespace {
 
-	sl::DLSSMode find_optimal_mode(uint32_t outputWidth, uint32_t outputHeight, uint32_t desiredWidth, uint32_t desiredHeight, sl::DLSSOptimalSettings &out_optimalSettings, bool use_dlss_rr = false) {
-		// For DLSS-RR, use the DLSS-D API; for regular DLSS, use the standard DLSS API
-		if (use_dlss_rr) {
-			if (StreamlineContext::get().slDLSSDGetOptimalSettings == nullptr) {
-				return sl::DLSSMode::eOff;
-			}
-		} else {
-			if (StreamlineContext::get().slDLSSGetOptimalSettings == nullptr) {
-				return sl::DLSSMode::eOff;
-			}
-		}
+struct DlssOptimalSettings {
+	uint32_t optimal_render_width = 0;
+	uint32_t optimal_render_height = 0;
+	float optimal_sharpness = 0.0f;
+	uint32_t render_width_min = 0;
+	uint32_t render_height_min = 0;
+	uint32_t render_width_max = 0;
+	uint32_t render_height_max = 0;
+};
 
-		sl::DLSSMode modes[] = { sl::DLSSMode::eDLAA, sl::DLSSMode::eMaxQuality, sl::DLSSMode::eBalanced, sl::DLSSMode::eMaxPerformance, sl::DLSSMode::eUltraPerformance };
-		sl::DLSSOptimalSettings settings[sizeof(modes) / sizeof(modes[0])];
-		bool validSettings[sizeof(modes) / sizeof(modes[0])];
-		Vector2 distance[sizeof(modes) / sizeof(modes[0])];
-		memset(validSettings, 0, sizeof(validSettings));
-
-		for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
-			sl::Result result;
-
-			if (use_dlss_rr) {
-				sl::DLSSDOptions dlssDOptions = {};
-				dlssDOptions.outputWidth = outputWidth;
-				dlssDOptions.outputHeight = outputHeight;
-				dlssDOptions.mode = modes[i];
-				sl::DLSSDOptimalSettings dlssDSettings;
-				result = StreamlineContext::get().slDLSSDGetOptimalSettings(dlssDOptions, dlssDSettings);
-				if (result == sl::Result::eOk) {
-					// Copy to common settings struct
-					settings[i].optimalRenderWidth = dlssDSettings.optimalRenderWidth;
-					settings[i].optimalRenderHeight = dlssDSettings.optimalRenderHeight;
-					settings[i].optimalSharpness = dlssDSettings.optimalSharpness;
-					settings[i].renderWidthMin = dlssDSettings.renderWidthMin;
-					settings[i].renderHeightMin = dlssDSettings.renderHeightMin;
-					settings[i].renderWidthMax = dlssDSettings.renderWidthMax;
-					settings[i].renderHeightMax = dlssDSettings.renderHeightMax;
-				}
-			} else {
-				sl::DLSSOptions dlssOptions = {};
-				dlssOptions.outputWidth = outputWidth;
-				dlssOptions.outputHeight = outputHeight;
-				dlssOptions.mode = modes[i];
-				result = StreamlineContext::get().slDLSSGetOptimalSettings(dlssOptions, settings[i]);
-			}
-
-			if (result != sl::Result::eOk) {
-				continue;
-			}
-
-			sl::DLSSOptimalSettings &optimalSettings = settings[i];
-			if (desiredWidth >= optimalSettings.renderWidthMin &&
-					desiredWidth <= optimalSettings.renderWidthMax &&
-					desiredHeight >= optimalSettings.renderHeightMin &&
-					desiredHeight <= optimalSettings.renderHeightMax) {
-				validSettings[i] = true;
-				distance[i] = Vector2(fabsf((float)optimalSettings.optimalRenderWidth - (float)desiredWidth), fabsf((float)optimalSettings.optimalRenderHeight - (float)desiredHeight));
-			}
-		}
-
-		// now select the closest match
-		Vector2 closestDistance(DLSS_OPTIMAL_MODE_MAX_DISTANCE, DLSS_OPTIMAL_MODE_MAX_DISTANCE);
-		int closestDistanceMatch = -1;
-		for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
-			if (validSettings[i]) {
-				if (distance[i].length_squared() < closestDistance.length_squared()) {
-					closestDistanceMatch = i;
-					closestDistance = distance[i];
-				}
-			}
-		}
-
-		if (closestDistanceMatch != -1) {
-			out_optimalSettings = settings[closestDistanceMatch];
-			return modes[closestDistanceMatch];
-		}
-
-		ERR_FAIL_V_MSG(sl::DLSSMode::eOff, "Couldn't find an appropriate DLSS mode.");
-	}
-}; // end class
-}; // end namespace RendererRD
-
-static Vector<unsigned int> g_dlss_freeViewportIndices;
-static unsigned int g_dlss_viewportIndex = 1;
-
-DLSSContextInner::~DLSSContextInner() {
-	g_dlss_freeViewportIndices.push_back((unsigned int)viewport);
+static void fill_matrix_array(const Projection &p_matrix, float *r_values) {
+	r_values[0] = p_matrix.columns[0].x;
+	r_values[1] = p_matrix.columns[1].x;
+	r_values[2] = p_matrix.columns[2].x;
+	r_values[3] = p_matrix.columns[3].x;
+	r_values[4] = p_matrix.columns[0].y;
+	r_values[5] = p_matrix.columns[1].y;
+	r_values[6] = p_matrix.columns[2].y;
+	r_values[7] = p_matrix.columns[3].y;
+	r_values[8] = p_matrix.columns[0].z;
+	r_values[9] = p_matrix.columns[1].z;
+	r_values[10] = p_matrix.columns[2].z;
+	r_values[11] = p_matrix.columns[3].z;
+	r_values[12] = p_matrix.columns[0].w;
+	r_values[13] = p_matrix.columns[1].w;
+	r_values[14] = p_matrix.columns[2].w;
+	r_values[15] = p_matrix.columns[3].w;
 }
 
-DLSSContextInner::DLSSContextInner() {
-	if (g_dlss_freeViewportIndices.size() == 0) {
-		g_dlss_freeViewportIndices.push_back(g_dlss_viewportIndex++);
-	}
-	viewport = g_dlss_freeViewportIndices[g_dlss_freeViewportIndices.size() - 1];
-	g_dlss_freeViewportIndices.remove_at(g_dlss_freeViewportIndices.size() - 1);
-}
-
-DLSSEffect::DLSSEffect() {
-	// Initialize motion vector decode shader
-	Vector<String> modes;
-	modes.push_back("\n");
-	shaders.mvec_decode_shader.initialize(modes, "");
-	shaders.mvec_decode_version = shaders.mvec_decode_shader.version_create();
-	shaders.mvec_decode_pipeline = RD::get_singleton()->compute_pipeline_create(shaders.mvec_decode_shader.version_get_shader(shaders.mvec_decode_version, 0));
-}
-
-DLSSEffect::~DLSSEffect() {
-	// Deinitialize motion vector decode
-	shaders.mvec_decode_shader.version_free(shaders.mvec_decode_version);
-}
-
-DLSSContext *DLSSEffect::create_context(Size2i p_internal_size, Size2i p_target_size) {
-	DLSSContextInner *context = memnew(RendererRD::DLSSContextInner);
-
-	context->currentDlssOptions.mode = context->find_optimal_mode(p_target_size.width, p_target_size.height, p_internal_size.width, p_internal_size.height, context->currentOptimalSettings);
-	context->currentDlssOptions.outputWidth = p_target_size.width;
-	context->currentDlssOptions.outputHeight = p_target_size.height;
-
-	context->is_d3d12 = (RD::get_singleton()->get_device_api_name().to_lower() == "d3d12");
-
-	return context;
-}
-
+#ifdef DLSS_STREAMLINE_ENABLED
 static sl::float4x4 sl_make_identity_matrix() {
 	sl::float4x4 ret;
 	ret.setRow(0, sl::float4(1.0f, 0.0f, 0.0f, 0.0f));
@@ -193,55 +98,492 @@ static sl::float4x4 sl_make_identity_matrix() {
 	return ret;
 }
 
-static sl::float4x4 sl_convert_matrix(const Projection &mtx) {
+static sl::float4x4 sl_convert_matrix(const Projection &p_matrix) {
 	sl::float4x4 ret;
-	ret.setRow(0, sl::float4(mtx.columns[0].x, mtx.columns[1].x, mtx.columns[2].x, mtx.columns[3].x));
-	ret.setRow(1, sl::float4(mtx.columns[0].y, mtx.columns[1].y, mtx.columns[2].y, mtx.columns[3].y));
-	ret.setRow(2, sl::float4(mtx.columns[0].z, mtx.columns[1].z, mtx.columns[2].z, mtx.columns[3].z));
-	ret.setRow(3, sl::float4(mtx.columns[0].w, mtx.columns[1].w, mtx.columns[2].w, mtx.columns[3].w));
+	ret.setRow(0, sl::float4(p_matrix.columns[0].x, p_matrix.columns[1].x, p_matrix.columns[2].x, p_matrix.columns[3].x));
+	ret.setRow(1, sl::float4(p_matrix.columns[0].y, p_matrix.columns[1].y, p_matrix.columns[2].y, p_matrix.columns[3].y));
+	ret.setRow(2, sl::float4(p_matrix.columns[0].z, p_matrix.columns[1].z, p_matrix.columns[2].z, p_matrix.columns[3].z));
+	ret.setRow(3, sl::float4(p_matrix.columns[0].w, p_matrix.columns[1].w, p_matrix.columns[2].w, p_matrix.columns[3].w));
 	return ret;
 }
 
-static sl::float3 sl_convert_vector(const Vector3 &vec) {
-	return sl::float3(vec.x, vec.y, vec.z);
+static sl::float3 sl_convert_vector(const Vector3 &p_vector) {
+	return sl::float3(p_vector.x, p_vector.y, p_vector.z);
+}
+#endif
+
+#ifdef DLSS_NGX_ENABLED
+static const char *const DLSS_NGX_PROJECT_ID = "f5d967b4-cf10-49fe-8f55-7c3f8b3d92d3";
+static const char *const DLSS_NGX_ENABLE_ENV = "GODOT_DLSS_NGX_ENABLE";
+
+struct DlssNgxState {
+	bool init_attempted = false;
+	bool initialized = false;
+	VkInstance instance = VK_NULL_HANDLE;
+	VkPhysicalDevice physical_device = VK_NULL_HANDLE;
+	VkDevice device = VK_NULL_HANDLE;
+	NVSDK_NGX_FeatureCommonInfo feature_common_info = {};
+	Vector<Vector<uint8_t>> feature_path_buffers;
+	Vector<const wchar_t *> feature_path_ptrs;
+};
+
+static DlssNgxState g_dlss_ngx_state;
+
+static void ngx_debug_log(const String &p_message) {
+	CharString utf8 = p_message.utf8();
+	fprintf(stderr, "[GodotNGX] %s\n", utf8.get_data());
+	fflush(stderr);
+}
+
+static bool ngx_runtime_enabled() {
+	String enabled = OS::get_singleton()->get_environment(DLSS_NGX_ENABLE_ENV).strip_edges().to_lower();
+	return enabled == "1" || enabled == "true" || enabled == "yes";
+}
+
+static String ngx_result_to_string(NVSDK_NGX_Result p_result) {
+	return vformat("0x%08x", uint32_t(p_result));
+}
+
+static bool ngx_result_failed(NVSDK_NGX_Result p_result) {
+	return p_result != NVSDK_NGX_Result_Success;
+}
+
+static void ngx_log_required_extensions() {
+	unsigned int instance_extension_count = 0;
+	unsigned int device_extension_count = 0;
+	const char **instance_extensions = nullptr;
+	const char **device_extensions = nullptr;
+	NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_RequiredExtensions(&instance_extension_count, &instance_extensions, &device_extension_count, &device_extensions);
+	if (ngx_result_failed(result)) {
+		ngx_debug_log("NGX required extension query failed: " + ngx_result_to_string(result));
+		return;
+	}
+
+	String instance_list;
+	for (unsigned int i = 0; i < instance_extension_count; i++) {
+		if (i > 0) {
+			instance_list += ", ";
+		}
+		instance_list += String(instance_extensions[i]);
+	}
+
+	String device_list;
+	for (unsigned int i = 0; i < device_extension_count; i++) {
+		if (i > 0) {
+			device_list += ", ";
+		}
+		device_list += String(device_extensions[i]);
+	}
+
+	ngx_debug_log(vformat("NGX required instance extensions (%d): %s", int(instance_extension_count), instance_list));
+	ngx_debug_log(vformat("NGX required device extensions (%d): %s", int(device_extension_count), device_list));
+}
+
+static Vector<uint8_t> make_wchar_string_buffer(const String &p_string) {
+	Vector<uint8_t> buffer = p_string.to_wchar_buffer();
+	buffer.resize(buffer.size() + sizeof(wchar_t));
+	uint8_t *w = buffer.ptrw();
+	memset(w + buffer.size() - sizeof(wchar_t), 0, sizeof(wchar_t));
+	return buffer;
+}
+
+static void ngx_add_feature_path(DlssNgxState &r_state, const String &p_path) {
+	if (p_path.is_empty() || !DirAccess::dir_exists_absolute(p_path)) {
+		return;
+	}
+
+	r_state.feature_path_buffers.push_back(make_wchar_string_buffer(p_path));
+	const Vector<uint8_t> &path_buffer = r_state.feature_path_buffers[r_state.feature_path_buffers.size() - 1];
+	r_state.feature_path_ptrs.push_back((const wchar_t *)path_buffer.ptr());
+}
+
+static void ngx_setup_feature_info(DlssNgxState &r_state) {
+	if (!r_state.feature_path_ptrs.is_empty()) {
+		return;
+	}
+
+	String exe_dir = OS::get_singleton()->get_executable_path().get_base_dir();
+	ngx_add_feature_path(r_state, exe_dir);
+	ngx_add_feature_path(r_state, exe_dir.path_join("../references/DLSS/lib/Linux_x86_64/rel").simplify_path());
+	ngx_add_feature_path(r_state, exe_dir.path_join("../references/DLSS/lib/Linux_x86_64/dev").simplify_path());
+
+	r_state.feature_common_info = {};
+	if (!r_state.feature_path_ptrs.is_empty()) {
+		r_state.feature_common_info.PathListInfo.Path = r_state.feature_path_ptrs.ptr();
+		r_state.feature_common_info.PathListInfo.Length = r_state.feature_path_ptrs.size();
+	}
+}
+
+static bool ngx_ensure_initialized() {
+	if (g_dlss_ngx_state.init_attempted) {
+		return g_dlss_ngx_state.initialized;
+	}
+	g_dlss_ngx_state.init_attempted = true;
+
+	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+
+	if (rd->get_device_api_name().to_lower() != "vulkan") {
+		return false;
+	}
+
+	g_dlss_ngx_state.instance = (VkInstance)rd->get_driver_resource(RD::DRIVER_RESOURCE_TOPMOST_OBJECT);
+	g_dlss_ngx_state.physical_device = (VkPhysicalDevice)rd->get_driver_resource(RD::DRIVER_RESOURCE_PHYSICAL_DEVICE);
+	g_dlss_ngx_state.device = (VkDevice)rd->get_driver_resource(RD::DRIVER_RESOURCE_LOGICAL_DEVICE);
+
+	String ngx_data_path = OS::get_singleton()->get_user_data_dir().path_join("ngx");
+	if (DirAccess::make_dir_recursive_absolute(ngx_data_path) != OK) {
+		WARN_PRINT("Failed to create NGX data directory: " + ngx_data_path);
+	}
+	Vector<uint8_t> ngx_data_path_wide = make_wchar_string_buffer(ngx_data_path);
+	ngx_setup_feature_info(g_dlss_ngx_state);
+	ngx_log_required_extensions();
+	ngx_debug_log(vformat("NGX init begin. data_path=%s feature_paths=%d", ngx_data_path, g_dlss_ngx_state.feature_path_ptrs.size()));
+
+	NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_Init_with_ProjectID(
+			DLSS_NGX_PROJECT_ID,
+			NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+			VERSION_FULL_BUILD,
+			(const wchar_t *)ngx_data_path_wide.ptr(),
+			g_dlss_ngx_state.instance,
+			g_dlss_ngx_state.physical_device,
+			g_dlss_ngx_state.device,
+			nullptr,
+			nullptr,
+			&g_dlss_ngx_state.feature_common_info,
+			NVSDK_NGX_Version_API);
+	if (ngx_result_failed(result)) {
+		WARN_PRINT("NGX Vulkan initialization failed: " + ngx_result_to_string(result));
+		return false;
+	}
+
+	ngx_debug_log("NGX init succeeded.");
+	g_dlss_ngx_state.initialized = true;
+	return true;
+}
+
+static void ngx_shutdown() {
+	if (!g_dlss_ngx_state.initialized) {
+		return;
+	}
+
+	NVSDK_NGX_VULKAN_Shutdown1(g_dlss_ngx_state.device);
+	g_dlss_ngx_state = {};
+}
+
+static NVSDK_NGX_PerfQuality_Value ngx_select_perf_quality(uint32_t p_output_width, uint32_t p_output_height, uint32_t p_render_width, uint32_t p_render_height) {
+	if (p_output_width == 0 || p_output_height == 0) {
+		return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+	}
+
+	if (p_render_width >= p_output_width && p_render_height >= p_output_height) {
+		return NVSDK_NGX_PerfQuality_Value_DLAA;
+	}
+
+	const float scale_x = float(p_render_width) / float(p_output_width);
+	const float scale_y = float(p_render_height) / float(p_output_height);
+	const float scale = MIN(scale_x, scale_y);
+
+	if (scale >= 0.66f) {
+		return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+	}
+	if (scale >= 0.58f) {
+		return NVSDK_NGX_PerfQuality_Value_Balanced;
+	}
+	if (scale >= 0.50f) {
+		return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+	}
+	return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+}
+
+static int ngx_make_feature_flags(bool p_reverse_depth, bool p_auto_exposure) {
+	int flags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
+	if (p_reverse_depth) {
+		flags |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+	}
+	if (p_auto_exposure) {
+		flags |= NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+	}
+	return flags;
+}
+
+static NVSDK_NGX_Resource_VK ngx_texture_to_resource(RID p_texture, bool p_write_access = false) {
+	RD *rd = RD::get_singleton();
+	VkImageSubresourceRange subresource_range = {};
+	subresource_range.aspectMask = (VkImageAspectFlags)rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_VIEW_ASPECT_MASK, p_texture);
+	subresource_range.baseMipLevel = uint32_t(rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_VIEW_BASE_MIPMAP, p_texture));
+	subresource_range.levelCount = uint32_t(rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_VIEW_MIPMAP_COUNT, p_texture));
+	subresource_range.baseArrayLayer = uint32_t(rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_VIEW_BASE_LAYER, p_texture));
+	subresource_range.layerCount = uint32_t(rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_VIEW_LAYER_COUNT, p_texture));
+
+	RD::TextureFormat texture_format = rd->texture_get_format(p_texture);
+	const bool read_write = p_write_access || (rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, p_texture) & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
+	return NVSDK_NGX_Create_ImageView_Resource_VK(
+			(VkImageView)rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_VIEW, p_texture),
+			(VkImage)rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE, p_texture),
+			subresource_range,
+			(VkFormat)rd->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, p_texture),
+			texture_format.width,
+			texture_format.height,
+			read_write);
+}
+#endif
+
+} // namespace
+
+#ifdef DLSS_STREAMLINE_ENABLED
+namespace RendererRD {
+class DLSSContextStreamline : public DLSSContext {
+public:
+	sl::ViewportHandle viewport;
+	sl::Constants constants;
+	sl::DLSSOptions current_dlss_options;
+	sl::DLSSOptimalSettings current_optimal_settings;
+	sl::DLSSDOptions current_dlssd_options;
+
+	DLSSContextStreamline();
+	~DLSSContextStreamline() override;
+
+	sl::DLSSMode find_optimal_mode(uint32_t p_output_width, uint32_t p_output_height, uint32_t p_desired_width, uint32_t p_desired_height, sl::DLSSOptimalSettings &r_optimal_settings, bool p_ray_reconstruction = false) {
+		if (p_ray_reconstruction) {
+			if (StreamlineContext::get().slDLSSDGetOptimalSettings == nullptr) {
+				return sl::DLSSMode::eOff;
+			}
+		} else if (StreamlineContext::get().slDLSSGetOptimalSettings == nullptr) {
+			return sl::DLSSMode::eOff;
+		}
+
+		sl::DLSSMode modes[] = { sl::DLSSMode::eDLAA, sl::DLSSMode::eMaxQuality, sl::DLSSMode::eBalanced, sl::DLSSMode::eMaxPerformance, sl::DLSSMode::eUltraPerformance };
+		sl::DLSSOptimalSettings settings[sizeof(modes) / sizeof(modes[0])];
+		bool valid_settings[sizeof(modes) / sizeof(modes[0])];
+		Vector2 distance[sizeof(modes) / sizeof(modes[0])];
+		memset(valid_settings, 0, sizeof(valid_settings));
+
+		for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+			sl::Result result;
+			if (p_ray_reconstruction) {
+				sl::DLSSDOptions dlssd_options = {};
+				dlssd_options.outputWidth = p_output_width;
+				dlssd_options.outputHeight = p_output_height;
+				dlssd_options.mode = modes[i];
+				sl::DLSSDOptimalSettings dlssd_settings;
+				result = StreamlineContext::get().slDLSSDGetOptimalSettings(dlssd_options, dlssd_settings);
+				if (result == sl::Result::eOk) {
+					settings[i].optimalRenderWidth = dlssd_settings.optimalRenderWidth;
+					settings[i].optimalRenderHeight = dlssd_settings.optimalRenderHeight;
+					settings[i].optimalSharpness = dlssd_settings.optimalSharpness;
+					settings[i].renderWidthMin = dlssd_settings.renderWidthMin;
+					settings[i].renderHeightMin = dlssd_settings.renderHeightMin;
+					settings[i].renderWidthMax = dlssd_settings.renderWidthMax;
+					settings[i].renderHeightMax = dlssd_settings.renderHeightMax;
+				}
+			} else {
+				sl::DLSSOptions dlss_options = {};
+				dlss_options.outputWidth = p_output_width;
+				dlss_options.outputHeight = p_output_height;
+				dlss_options.mode = modes[i];
+				result = StreamlineContext::get().slDLSSGetOptimalSettings(dlss_options, settings[i]);
+			}
+
+			if (result != sl::Result::eOk) {
+				continue;
+			}
+
+			sl::DLSSOptimalSettings &optimal_settings = settings[i];
+			if (p_desired_width >= optimal_settings.renderWidthMin &&
+					p_desired_width <= optimal_settings.renderWidthMax &&
+					p_desired_height >= optimal_settings.renderHeightMin &&
+					p_desired_height <= optimal_settings.renderHeightMax) {
+				valid_settings[i] = true;
+				distance[i] = Vector2(Math::abs((float)optimal_settings.optimalRenderWidth - (float)p_desired_width), Math::abs((float)optimal_settings.optimalRenderHeight - (float)p_desired_height));
+			}
+		}
+
+		Vector2 closest_distance(DLSS_OPTIMAL_MODE_MAX_DISTANCE, DLSS_OPTIMAL_MODE_MAX_DISTANCE);
+		int closest_distance_match = -1;
+		for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+			if (valid_settings[i] && distance[i].length_squared() < closest_distance.length_squared()) {
+				closest_distance_match = int(i);
+				closest_distance = distance[i];
+			}
+		}
+
+		if (closest_distance_match != -1) {
+			r_optimal_settings = settings[closest_distance_match];
+			return modes[closest_distance_match];
+		}
+
+		return sl::DLSSMode::eOff;
+	}
+};
+} // namespace RendererRD
+
+static Vector<unsigned int> g_dlss_free_viewport_indices;
+static unsigned int g_dlss_viewport_index = 1;
+
+DLSSContextStreamline::DLSSContextStreamline() {
+	backend_type = BACKEND_STREAMLINE;
+	if (g_dlss_free_viewport_indices.is_empty()) {
+		g_dlss_free_viewport_indices.push_back(g_dlss_viewport_index++);
+	}
+	viewport = g_dlss_free_viewport_indices[g_dlss_free_viewport_indices.size() - 1];
+	g_dlss_free_viewport_indices.remove_at(g_dlss_free_viewport_indices.size() - 1);
+}
+
+DLSSContextStreamline::~DLSSContextStreamline() {
+	g_dlss_free_viewport_indices.push_back((unsigned int)viewport);
+}
+#endif
+
+#ifdef DLSS_NGX_ENABLED
+namespace RendererRD {
+class DLSSContextNgx : public DLSSContext {
+public:
+	NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+	NVSDK_NGX_Parameter *runtime_parameters = nullptr;
+	NVSDK_NGX_Handle *dlss_handle = nullptr;
+	NVSDK_NGX_Handle *dlssd_handle = nullptr;
+	RID scratch_buffer;
+	size_t scratch_size = 0;
+	uint32_t render_width = 0;
+	uint32_t render_height = 0;
+	uint32_t output_width = 0;
+	uint32_t output_height = 0;
+	float world_to_view[16] = {};
+	float view_to_clip[16] = {};
+
+	DLSSContextNgx() {
+		backend_type = BACKEND_NGX;
+	}
+
+	~DLSSContextNgx() override {
+		if (dlss_handle != nullptr) {
+			NVSDK_NGX_VULKAN_ReleaseFeature(dlss_handle);
+		}
+		if (dlssd_handle != nullptr) {
+			NVSDK_NGX_VULKAN_ReleaseFeature(dlssd_handle);
+		}
+		if (runtime_parameters != nullptr) {
+			NVSDK_NGX_VULKAN_DestroyParameters(runtime_parameters);
+		}
+		if (scratch_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(scratch_buffer);
+		}
+	}
+};
+} // namespace RendererRD
+#endif
+
+DLSSEffect::DLSSEffect() {
+	Vector<String> modes;
+	modes.push_back("\n");
+	shaders.mvec_decode_shader.initialize(modes, "");
+	shaders.mvec_decode_version = shaders.mvec_decode_shader.version_create();
+	shaders.mvec_decode_pipeline = RD::get_singleton()->compute_pipeline_create(shaders.mvec_decode_shader.version_get_shader(shaders.mvec_decode_version, 0));
+
+#ifdef DLSS_STREAMLINE_ENABLED
+	backend_type = DLSSContext::BACKEND_STREAMLINE;
+#endif
+}
+
+DLSSEffect::~DLSSEffect() {
+	shaders.mvec_decode_shader.version_free(shaders.mvec_decode_version);
+#ifdef DLSS_NGX_ENABLED
+	if (backend_type == DLSSContext::BACKEND_NGX) {
+		ngx_shutdown();
+	}
+#endif
+}
+
+DLSSContext *DLSSEffect::create_context(Size2i p_internal_size, Size2i p_target_size) {
+#ifdef DLSS_NGX_ENABLED
+	if (backend_type == DLSSContext::BACKEND_NONE && RD::get_singleton()->get_device_api_name().to_lower() == "vulkan" && ngx_runtime_enabled()) {
+		backend_type = DLSSContext::BACKEND_NGX;
+	}
+#endif
+
+#ifdef DLSS_STREAMLINE_ENABLED
+	if (backend_type == DLSSContext::BACKEND_STREAMLINE) {
+		DLSSContextStreamline *context = memnew(DLSSContextStreamline);
+		context->current_dlss_options.mode = context->find_optimal_mode(p_target_size.width, p_target_size.height, p_internal_size.width, p_internal_size.height, context->current_optimal_settings);
+		context->current_dlss_options.outputWidth = p_target_size.width;
+		context->current_dlss_options.outputHeight = p_target_size.height;
+		context->is_d3d12 = (RD::get_singleton()->get_device_api_name().to_lower() == "d3d12");
+		return context;
+	}
+#endif
+
+#ifdef DLSS_NGX_ENABLED
+	if (backend_type == DLSSContext::BACKEND_NGX) {
+		ngx_debug_log(vformat("Creating NGX DLSS context. render=%dx%d output=%dx%d", p_internal_size.width, p_internal_size.height, p_target_size.width, p_target_size.height));
+		if (!ngx_ensure_initialized()) {
+			ngx_debug_log("NGX init failed during DLSS context creation.");
+			return nullptr;
+		}
+
+		DLSSContextNgx *context = memnew(DLSSContextNgx);
+		context->render_width = p_internal_size.width;
+		context->render_height = p_internal_size.height;
+		context->output_width = p_target_size.width;
+		context->output_height = p_target_size.height;
+		context->perf_quality = ngx_select_perf_quality(p_target_size.width, p_target_size.height, p_internal_size.width, p_internal_size.height);
+		ngx_debug_log(vformat("NGX DLSS context perf quality=%d", int(context->perf_quality)));
+
+		NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_AllocateParameters(&context->runtime_parameters);
+		if (ngx_result_failed(result)) {
+			WARN_PRINT("Failed to allocate NGX runtime parameters: " + ngx_result_to_string(result));
+			memdelete(context);
+			return nullptr;
+		}
+		ngx_debug_log("NGX runtime parameters allocated.");
+
+		return context;
+	}
+#endif
+
+	return nullptr;
 }
 
 void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
-	DLSSContextInner *context = (DLSSContextInner *)p_params.context;
-
-	// Delay enablement
-	if (context->delay > 0) {
-		--context->delay;
+	DLSSContext *base_context = p_params.context;
+	if (base_context == nullptr) {
 		return;
 	}
 
-	// If DLSS is not loaded, escape early
-	if (StreamlineContext::get().slDLSSSetOptions == nullptr) {
+	if (base_context->delay > 0) {
+		--base_context->delay;
 		return;
 	}
 
-	// Begin frame if needed.
-	if (StreamlineContext::get().last_token == nullptr) {
-		StreamlineContext::get().get_new_frame_token();
+#ifdef DLSS_STREAMLINE_ENABLED
+	if (base_context->backend_type == DLSSContext::BACKEND_STREAMLINE) {
+		if (StreamlineContext::get().slDLSSSetOptions == nullptr) {
+			return;
+		}
+		if (StreamlineContext::get().last_token == nullptr) {
+			StreamlineContext::get().get_new_frame_token();
+		}
 	}
+#endif
 
-	context->last_parameters = p_params;
-	context->last_effect = this;
+#ifdef DLSS_NGX_ENABLED
+	if (base_context->backend_type == DLSSContext::BACKEND_NGX && !ngx_ensure_initialized()) {
+		return;
+	}
+#endif
 
-	// Decode mvecs
+	base_context->last_parameters = p_params;
+	base_context->last_effect = this;
+
 	{
 		RD::get_singleton()->draw_command_begin_label("Decode Invalid Motion Vectors");
 		UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 		ERR_FAIL_NULL(uniform_set_cache);
-		MaterialStorage *material_storage = MaterialStorage::get_singleton();
-		ERR_FAIL_NULL(material_storage);
 
-		// setup our uniforms
 		RD::Uniform u_velocity_image(RD::UNIFORM_TYPE_IMAGE, 0, p_params.velocity);
 		RD::Uniform u_depth_texture(RD::UNIFORM_TYPE_TEXTURE, 0, p_params.depth);
 
 		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-
 		RID shader = shaders.mvec_decode_shader.version_get_shader(shaders.mvec_decode_version, 0);
 		ERR_FAIL_COND(shader.is_null());
 
@@ -249,7 +591,7 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_velocity_image), 0);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_depth_texture), 1);
 
-		auto texture_format = RD::get_singleton()->texture_get_format(p_params.velocity);
+		RD::TextureFormat texture_format = RD::get_singleton()->texture_get_format(p_params.velocity);
 
 		float push_constants[20];
 		push_constants[0] = texture_format.width;
@@ -261,168 +603,135 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 
 		RD::get_singleton()->compute_list_dispatch_threads(compute_list, texture_format.width, texture_format.height, 1);
 		RD::get_singleton()->compute_list_add_barrier(compute_list);
-
 		RD::get_singleton()->compute_list_end();
 		RD::get_singleton()->draw_command_end_label();
 	}
 
-	// Inject DLSS into the render graph
-	RD::CallbackResource res[8]; // Increased for DLSS-RR buffers
-	int num_resources = 0;
-	res[num_resources++].rid = p_params.color;
-	res[num_resources++].rid = p_params.output;
-	res[num_resources++].rid = p_params.depth;
-	res[num_resources++].rid = p_params.velocity;
+	RD::CallbackResource resources[9];
+	int resource_count = 0;
+	auto add_resource = [&](RID p_rid, RD::CallbackResourceUsage p_usage) {
+		if (!p_rid.is_valid()) {
+			return;
+		}
+		resources[resource_count].rid = p_rid;
+		resources[resource_count].usage = p_usage;
+		resource_count++;
+	};
 
-	// Add DLSS-RR buffers if provided
+	add_resource(p_params.color, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+	add_resource(p_params.output, base_context->backend_type == DLSSContext::BACKEND_NGX ? RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE : RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+	add_resource(p_params.depth, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+	add_resource(p_params.velocity, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+	add_resource(p_params.exposure, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
 	if (p_params.dlss_rr) {
-		if (p_params.dlss_rr_diffuse_albedo.is_valid()) {
-			res[num_resources++].rid = p_params.dlss_rr_diffuse_albedo;
-		}
-		if (p_params.dlss_rr_specular_albedo.is_valid()) {
-			res[num_resources++].rid = p_params.dlss_rr_specular_albedo;
-		}
-		if (p_params.dlss_rr_normal_roughness.is_valid()) {
-			res[num_resources++].rid = p_params.dlss_rr_normal_roughness;
-		}
-		if (p_params.dlss_rr_specular_hit_dist.is_valid()) {
-			res[num_resources++].rid = p_params.dlss_rr_specular_hit_dist;
-		}
+		add_resource(p_params.dlss_rr_diffuse_albedo, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+		add_resource(p_params.dlss_rr_specular_albedo, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+		add_resource(p_params.dlss_rr_normal_roughness, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+		add_resource(p_params.dlss_rr_specular_hit_dist, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
 	}
 
-	for (int i = 0; i < num_resources; i++) {
-		res[i].usage = RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE;
-	}
-	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, p_params.context, VectorView<RD::CallbackResource>(res, num_resources));
+	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, base_context, VectorView<RD::CallbackResource>(resources, resource_count));
 }
 
-void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params) {
-	DLSSContextInner *context = (DLSSContextInner *)p_params.context;
+#ifdef DLSS_STREAMLINE_ENABLED
+void DLSSEffect::_upscale_internal_streamline(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {
+	DLSSContextStreamline *context = (DLSSContextStreamline *)p_params.context;
+	void *native_cmdlist = RD::get_singleton()->get_device_driver()->command_buffer_get_native_handle(p_cmdid);
 
-	void *nativeCmdlist = RD::get_singleton()->get_device_driver()->command_buffer_get_native_handle(cmdid);
-
-	// Helper function for tagging resources.
-	auto assignResource = [context](sl::Resource *resources, sl::ResourceTag *resourceTags, int &numResources, RID textureRID, sl::BufferType bufferType, sl::ResourceLifecycle lifecycle) {
-		if (!textureRID.is_valid() || textureRID.is_null()) {
+	auto assign_resource = [context](sl::Resource *r_resources, sl::ResourceTag *r_resource_tags, int &r_resource_count, RID p_texture_rid, sl::BufferType p_buffer_type, sl::ResourceLifecycle p_lifecycle) {
+		if (!p_texture_rid.is_valid() || p_texture_rid.is_null()) {
 			return;
 		}
 
-		RD::TextureFormat texture_format = RD::get_singleton()->texture_get_format(textureRID);
-		uint64_t texture_image = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, textureRID);
-		uint64_t texture_view = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_VIEW, textureRID);
-		uint64_t texture_device_memory = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DEVICE_MEMORY, textureRID);
-		uint64_t texture_state = DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY;
+		RD::TextureFormat texture_format = RD::get_singleton()->texture_get_format(p_texture_rid);
+		uint64_t texture_image = RD::get_singleton()->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE, p_texture_rid);
+		uint64_t texture_view = RD::get_singleton()->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_VIEW, p_texture_rid);
+		uint64_t texture_device_memory = RD::get_singleton()->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_DEVICE_MEMORY, p_texture_rid);
+		uint64_t texture_state = context->is_d3d12 ? DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR : DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY;
+		uint64_t texture_vk_format = RD::get_singleton()->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, p_texture_rid);
+		uint64_t texture_usage_flags = RD::get_singleton()->get_driver_resource(RD::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, p_texture_rid);
+		auto &destination_resource = r_resources[r_resource_count];
 		if (context->is_d3d12) {
-			texture_state = DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR;
-		}
-		uint64_t texture_vkformat = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, textureRID);
-		uint64_t texture_usage_flags = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, textureRID);
-		auto &destinationResource = resources[numResources];
-		if (context->is_d3d12) {
-			destinationResource = sl::Resource(sl::ResourceType::eTex2d,
-					(void *)texture_view, texture_state);
+			destination_resource = sl::Resource(sl::ResourceType::eTex2d, (void *)texture_view, texture_state);
 		} else {
-			destinationResource = sl::Resource(sl::ResourceType::eTex2d,
-					(void *)texture_image, (void *)texture_device_memory, (void *)texture_view, texture_state);
+			destination_resource = sl::Resource(sl::ResourceType::eTex2d, (void *)texture_image, (void *)texture_device_memory, (void *)texture_view, texture_state);
 		}
-		destinationResource.width = texture_format.width;
-		destinationResource.height = texture_format.height;
-		destinationResource.nativeFormat = texture_vkformat;
-		destinationResource.arrayLayers = texture_format.array_layers;
-		destinationResource.flags = 0;
-		destinationResource.mipLevels = texture_format.mipmaps;
-		destinationResource.usage = texture_usage_flags;
+		destination_resource.width = texture_format.width;
+		destination_resource.height = texture_format.height;
+		destination_resource.nativeFormat = texture_vk_format;
+		destination_resource.arrayLayers = texture_format.array_layers;
+		destination_resource.flags = 0;
+		destination_resource.mipLevels = texture_format.mipmaps;
+		destination_resource.usage = texture_usage_flags;
 
-		resourceTags[numResources] = sl::ResourceTag(resources + numResources, bufferType, lifecycle, nullptr);
-		++numResources;
+		r_resource_tags[r_resource_count] = sl::ResourceTag(r_resources + r_resource_count, p_buffer_type, p_lifecycle, nullptr);
+		r_resource_count++;
 	};
 
-	// Set DLSS or DLSS-RR options depending on mode
 	bool use_dlss_rr = p_params.dlss_rr && StreamlineContext::get().slDLSSDSetOptions != nullptr && StreamlineContext::get().streamline_capabilities.dlss_rr_available;
 
 	if (use_dlss_rr) {
-		// Set DLSS-RR (Ray Reconstruction) options
-		context->currentDlssDOptions.mode = context->currentDlssOptions.mode;
-		context->currentDlssDOptions.outputWidth = context->currentDlssOptions.outputWidth;
-		context->currentDlssDOptions.outputHeight = context->currentDlssOptions.outputHeight;
-		context->currentDlssDOptions.colorBuffersHDR = sl::Boolean::eTrue;
-		context->currentDlssDOptions.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::ePacked; // Normal XYZ + Roughness W
+		context->current_dlssd_options.mode = context->current_dlss_options.mode;
+		context->current_dlssd_options.outputWidth = context->current_dlss_options.outputWidth;
+		context->current_dlssd_options.outputHeight = context->current_dlss_options.outputHeight;
+		context->current_dlssd_options.colorBuffersHDR = sl::Boolean::eTrue;
+		context->current_dlssd_options.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::ePacked;
 
-		// Set world-to-camera and camera-to-world matrices for DLSS-RR
-		// worldToCameraView = view matrix (world-to-camera transformation)
-		// cameraViewToWorld = inverse view matrix (camera-to-world transformation)
 		Transform3D view_matrix = p_params.cam_transform.affine_inverse();
-		context->currentDlssDOptions.worldToCameraView = sl_convert_matrix(Projection(view_matrix)); //
-		context->currentDlssDOptions.cameraViewToWorld = sl_convert_matrix(Projection(view_matrix).inverse());
-		char dlssPreset = p_params.preset;
-		if (dlssPreset == '?') {
-			dlssPreset = StreamlineContext::get().dlss_rr_default_preset;
-		}
+		context->current_dlssd_options.worldToCameraView = sl_convert_matrix(Projection(view_matrix));
+		context->current_dlssd_options.cameraViewToWorld = sl_convert_matrix(Projection(view_matrix).inverse());
+		char dlss_preset = p_params.preset == '?' ? StreamlineContext::get().dlss_rr_default_preset : p_params.preset;
 
-		if (dlssPreset == '?') {
-			context->currentDlssDOptions.dlaaPreset = sl::DLSSDPreset::eDefault;
-			context->currentDlssDOptions.qualityPreset = sl::DLSSDPreset::eDefault;
-			context->currentDlssDOptions.balancedPreset = sl::DLSSDPreset::eDefault;
-			context->currentDlssDOptions.performancePreset = sl::DLSSDPreset::eDefault;
-			context->currentDlssDOptions.ultraPerformancePreset = sl::DLSSDPreset::eDefault;
+		if (dlss_preset == '?') {
+			context->current_dlssd_options.dlaaPreset = sl::DLSSDPreset::eDefault;
+			context->current_dlssd_options.qualityPreset = sl::DLSSDPreset::eDefault;
+			context->current_dlssd_options.balancedPreset = sl::DLSSDPreset::eDefault;
+			context->current_dlssd_options.performancePreset = sl::DLSSDPreset::eDefault;
+			context->current_dlssd_options.ultraPerformancePreset = sl::DLSSDPreset::eDefault;
 		} else {
-			int presetNo = ((int)dlssPreset - (int)'D');
-			sl::DLSSDPreset preset = (sl::DLSSDPreset)((int)sl::DLSSDPreset::ePresetD + presetNo);
-			context->currentDlssDOptions.dlaaPreset = preset;
-			context->currentDlssDOptions.qualityPreset = preset;
-			context->currentDlssDOptions.balancedPreset = preset;
-			context->currentDlssDOptions.performancePreset = preset;
-			context->currentDlssDOptions.ultraPerformancePreset = preset;
+			int preset_no = ((int)dlss_preset - (int)'D');
+			sl::DLSSDPreset preset = (sl::DLSSDPreset)((int)sl::DLSSDPreset::ePresetD + preset_no);
+			context->current_dlssd_options.dlaaPreset = preset;
+			context->current_dlssd_options.qualityPreset = preset;
+			context->current_dlssd_options.balancedPreset = preset;
+			context->current_dlssd_options.performancePreset = preset;
+			context->current_dlssd_options.ultraPerformancePreset = preset;
 		}
 
-		sl::Result result = StreamlineContext::get().slDLSSDSetOptions(context->viewport, context->currentDlssDOptions);
-		if (result != sl::Result::eOk) {
-			ERR_FAIL_MSG("Failed to call streamline slDLSSDSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
-		}
+		sl::Result result = StreamlineContext::get().slDLSSDSetOptions(context->viewport, context->current_dlssd_options);
+		ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slDLSSDSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
 	} else if (StreamlineContext::get().slDLSSSetOptions != nullptr && StreamlineContext::get().streamline_capabilities.dlss_available) {
-		// Set regular DLSS options
-		if (p_params.exposure.is_null() || !p_params.exposure.is_valid()) {
-			context->currentDlssOptions.useAutoExposure = sl::Boolean::eTrue;
+		context->current_dlss_options.useAutoExposure = (p_params.exposure.is_null() || !p_params.exposure.is_valid()) ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+		context->current_dlss_options.colorBuffersHDR = sl::Boolean::eTrue;
+		char dlss_preset = p_params.preset == '?' ? StreamlineContext::get().dlss_default_preset : p_params.preset;
+
+		if (dlss_preset == '?') {
+			context->current_dlss_options.dlaaPreset = sl::DLSSPreset::eDefault;
+			context->current_dlss_options.qualityPreset = sl::DLSSPreset::eDefault;
+			context->current_dlss_options.balancedPreset = sl::DLSSPreset::eDefault;
+			context->current_dlss_options.performancePreset = sl::DLSSPreset::eDefault;
+			context->current_dlss_options.ultraPerformancePreset = sl::DLSSPreset::eDefault;
 		} else {
-			context->currentDlssOptions.useAutoExposure = sl::Boolean::eFalse;
+			int preset_no = ((int)dlss_preset - (int)'F');
+			sl::DLSSPreset preset = (sl::DLSSPreset)((int)sl::DLSSPreset::ePresetF + preset_no);
+			context->current_dlss_options.dlaaPreset = preset;
+			context->current_dlss_options.qualityPreset = preset;
+			context->current_dlss_options.balancedPreset = preset;
+			context->current_dlss_options.performancePreset = preset;
+			context->current_dlss_options.ultraPerformancePreset = preset;
 		}
 
-		context->currentDlssOptions.colorBuffersHDR = sl::Boolean::eTrue;
-		char dlssPreset = p_params.preset;
-		if (dlssPreset == '?') {
-			dlssPreset = StreamlineContext::get().dlss_default_preset;
-		}
-
-		if (dlssPreset == '?') {
-			context->currentDlssOptions.dlaaPreset = sl::DLSSPreset::eDefault;
-			context->currentDlssOptions.qualityPreset = sl::DLSSPreset::eDefault;
-			context->currentDlssOptions.balancedPreset = sl::DLSSPreset::eDefault;
-			context->currentDlssOptions.performancePreset = sl::DLSSPreset::eDefault;
-			context->currentDlssOptions.ultraPerformancePreset = sl::DLSSPreset::eDefault;
-		} else {
-			int presetNo = ((int)dlssPreset - (int)'F');
-			sl::DLSSPreset preset = (sl::DLSSPreset)((int)sl::DLSSPreset::ePresetF + presetNo);
-			context->currentDlssOptions.dlaaPreset = preset;
-			context->currentDlssOptions.qualityPreset = preset;
-			context->currentDlssOptions.balancedPreset = preset;
-			context->currentDlssOptions.performancePreset = preset;
-			context->currentDlssOptions.ultraPerformancePreset = preset;
-		}
-
-		sl::Result result = StreamlineContext::get().slDLSSSetOptions(context->viewport, context->currentDlssOptions);
-		if (result != sl::Result::eOk) {
-			ERR_FAIL_MSG("Failed to call streamline slDLSSSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
-		}
+		sl::Result result = StreamlineContext::get().slDLSSSetOptions(context->viewport, context->current_dlss_options);
+		ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slDLSSSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
 	}
 
-	// Set SL Options
 	if (StreamlineContext::get().slSetConstants != nullptr) {
-		sl::float4x4 mtxIdentity = sl_make_identity_matrix();
-		context->constants.cameraViewToClip = sl_convert_matrix(p_params.cam_projection); // projection mtx (unjittered)
-		context->constants.clipToCameraView = sl_convert_matrix(p_params.cam_projection.inverse()); // projection mtx (unjittered, inverted)
-		context->constants.clipToLensClip = mtxIdentity; // keep identity unless some lens distortion is applied
-		context->constants.clipToPrevClip = sl_convert_matrix(p_params.reprojection); // reprojection matrix
-		context->constants.prevClipToClip = sl_convert_matrix(p_params.reprojection.inverse()); // inverted reprojection matrix
+		sl::float4x4 mtx_identity = sl_make_identity_matrix();
+		context->constants.cameraViewToClip = sl_convert_matrix(p_params.cam_projection);
+		context->constants.clipToCameraView = sl_convert_matrix(p_params.cam_projection.inverse());
+		context->constants.clipToLensClip = mtx_identity;
+		context->constants.clipToPrevClip = sl_convert_matrix(p_params.reprojection);
+		context->constants.prevClipToClip = sl_convert_matrix(p_params.reprojection.inverse());
 
 		context->constants.cameraPos = sl_convert_vector(p_params.cam_transform.get_origin());
 		context->constants.cameraFwd = sl_convert_vector(-p_params.cam_transform.get_basis().rows[2]);
@@ -433,7 +742,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		context->constants.cameraFar = p_params.z_far;
 		context->constants.cameraFOV = Math::deg_to_rad(p_params.fovy);
 		context->constants.cameraMotionIncluded = sl::Boolean::eTrue;
-		context->constants.cameraAspectRatio = static_cast<float>(context->currentDlssOptions.outputWidth) / static_cast<float>(context->currentDlssOptions.outputHeight);
+		context->constants.cameraAspectRatio = static_cast<float>(context->current_dlss_options.outputWidth) / static_cast<float>(context->current_dlss_options.outputHeight);
 		context->constants.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
 		context->constants.depthInverted = p_params.reverse_depth ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 		context->constants.motionVectors3D = sl::Boolean::eFalse;
@@ -444,141 +753,307 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		context->constants.orthographicProjection = sl::Boolean::eFalse;
 		context->constants.reset = p_params.reset_accumulation ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 		sl::Result result = StreamlineContext::get().slSetConstants(context->constants, *StreamlineContext::get().last_token, context->viewport);
-		if (result != sl::Result::eOk) {
-			ERR_FAIL_MSG("Failed to call streamline slSetConstants. Result: " + String(StreamlineContext::result_to_string(result)));
-		}
+		ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slSetConstants. Result: " + String(StreamlineContext::result_to_string(result)));
 	}
 
-	// Tag resources
 	if (StreamlineContext::get().slSetTag != nullptr) {
 		sl::Resource resources[10];
-		sl::ResourceTag resourceTags[10];
-		int numResources = 0;
+		sl::ResourceTag resource_tags[10];
+		int resource_count = 0;
 
-		assignResource(resources, resourceTags, numResources, p_params.color, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent);
-		assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent);
-		assignResource(resources, resourceTags, numResources, p_params.depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent);
-		assignResource(resources, resourceTags, numResources, p_params.velocity, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent);
+		assign_resource(resources, resource_tags, resource_count, p_params.color, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent);
+		assign_resource(resources, resource_tags, resource_count, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent);
+		assign_resource(resources, resource_tags, resource_count, p_params.depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent);
+		assign_resource(resources, resource_tags, resource_count, p_params.velocity, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent);
 
-		// Tag DLSS-RR specific buffers if enabled
 		if (use_dlss_rr) {
-			// kBufferTypeAlbedo is used for diffuse albedo
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_diffuse_albedo, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_specular_albedo, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
-			// kBufferTypeNormalRoughness for packed normal+roughness (XYZ=normal, W=roughness)
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_normal_roughness, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent);
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_specular_hit_dist, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
+			assign_resource(resources, resource_tags, resource_count, p_params.dlss_rr_diffuse_albedo, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
+			assign_resource(resources, resource_tags, resource_count, p_params.dlss_rr_specular_albedo, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
+			assign_resource(resources, resource_tags, resource_count, p_params.dlss_rr_normal_roughness, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent);
+			assign_resource(resources, resource_tags, resource_count, p_params.dlss_rr_specular_hit_dist, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
 		}
 
-		sl::Result result = StreamlineContext::get().slSetTag(context->viewport, resourceTags, numResources, nativeCmdlist);
-		if (result != sl::Result::eOk) {
-			ERR_FAIL_MSG("Failed to call streamline slSetTag. Result: " + String(StreamlineContext::result_to_string(result)));
-		}
+		sl::Result result = StreamlineContext::get().slSetTag(context->viewport, resource_tags, resource_count, native_cmdlist);
+		ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slSetTag. Result: " + String(StreamlineContext::result_to_string(result)));
 	}
 
-	// Toggle DLSS Frame Generation (only enabled in game mode)
 	if (StreamlineContext::get().slDLSSGSetOptions != nullptr && StreamlineContext::get().is_game && StreamlineContext::get().streamline_capabilities.dlss_g_available) {
-		sl::DLSSGOptions dlssGOptions{};
-		bool wantActivateDLSSG = p_params.dlss_g;
-		bool canActivateDLSSG = StreamlineContext::get().dlssg_delay == 0;
+		sl::DLSSGOptions dlssg_options{};
+		bool want_activate_dlssg = p_params.dlss_g;
+		bool can_activate_dlssg = StreamlineContext::get().dlssg_delay == 0;
 
-		// Disable previous DLSS-G context if needed
-		if (StreamlineContext::get().dlssg_viewport != sl::ViewportHandle(-1) && ((!wantActivateDLSSG && StreamlineContext::get().dlssg_viewport == context->viewport) || (wantActivateDLSSG && StreamlineContext::get().dlssg_viewport != context->viewport))) {
-			WARN_PRINT("Disabling DLSS-G on viewport: " + itos((unsigned int)StreamlineContext::get().dlssg_viewport));
-			dlssGOptions.mode = sl::DLSSGMode::eOff;
-			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(StreamlineContext::get().dlssg_viewport, dlssGOptions);
-			if (result != sl::Result::eOk) {
-				ERR_FAIL_MSG("Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
-			}
-
+		if (StreamlineContext::get().dlssg_viewport != sl::ViewportHandle(-1) && ((!want_activate_dlssg && StreamlineContext::get().dlssg_viewport == context->viewport) || (want_activate_dlssg && StreamlineContext::get().dlssg_viewport != context->viewport))) {
+			dlssg_options.mode = sl::DLSSGMode::eOff;
+			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(StreamlineContext::get().dlssg_viewport, dlssg_options);
+			ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
 			StreamlineContext::get().dlssg_viewport = sl::ViewportHandle(-1);
 		}
 
-		// Enable new DLSS-G context if needed
-		if (canActivateDLSSG && wantActivateDLSSG && StreamlineContext::get().dlssg_viewport != context->viewport) {
-			WARN_PRINT("Enabling DLSS-G on viewport: " + itos((unsigned int)context->viewport));
-
-			dlssGOptions.mode = sl::DLSSGMode::eOn;
-			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(context->viewport, dlssGOptions);
-			if (result != sl::Result::eOk) {
-				ERR_FAIL_MSG("Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
-			}
-
+		if (can_activate_dlssg && want_activate_dlssg && StreamlineContext::get().dlssg_viewport != context->viewport) {
+			dlssg_options.mode = sl::DLSSGMode::eOn;
+			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(context->viewport, dlssg_options);
+			ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
 			StreamlineContext::get().dlssg_viewport = context->viewport;
 		}
 	}
 
-	// Evaluate DLSS Super Resolution or DLSS Ray Reconstruction
-	if (context->currentDlssOptions.mode != sl::DLSSMode::eOff) {
+	if (context->current_dlss_options.mode != sl::DLSSMode::eOff) {
 		const sl::BaseStructure *inputs[] = { &context->viewport };
 		sl::Result result;
 
 		if (use_dlss_rr && StreamlineContext::get().streamline_capabilities.dlss_rr_available) {
-			// Use DLSS Ray Reconstruction
-			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineContext::get().last_token, inputs, 1, nativeCmdlist);
-			if (result != sl::Result::eOk) {
-				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for DLSS Ray Reconstruction. Result: " + String(StreamlineContext::result_to_string(result)));
-			}
+			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineContext::get().last_token, inputs, 1, native_cmdlist);
+			ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slEvaluateFeature for DLSS Ray Reconstruction. Result: " + String(StreamlineContext::result_to_string(result)));
 		} else if (StreamlineContext::get().streamline_capabilities.dlss_available) {
-			// Use regular DLSS
-			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS, *StreamlineContext::get().last_token, inputs, 1, nativeCmdlist);
-			if (result != sl::Result::eOk) {
-				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for DLSS Super Resolution. Result: " + String(StreamlineContext::result_to_string(result)));
-			}
+			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS, *StreamlineContext::get().last_token, inputs, 1, native_cmdlist);
+			ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slEvaluateFeature for DLSS Super Resolution. Result: " + String(StreamlineContext::result_to_string(result)));
 		}
 	}
 
-	// NIS support
-	// **********
 	if (p_params.sharpness > 0.0f && StreamlineContext::get().slNISSetOptions != nullptr && StreamlineContext::get().streamline_capabilities.nis_available) {
-		{ // Set NIS settings
-			sl::NISOptions options;
-			options.hdrMode = sl::NISHDR::eNone;
-			options.mode = sl::NISMode::eSharpen;
-			options.sharpness = p_params.sharpness;
-			StreamlineContext::get().slNISSetOptions(context->viewport, options);
-		}
+		sl::NISOptions options;
+		options.hdrMode = sl::NISHDR::eNone;
+		options.mode = sl::NISMode::eSharpen;
+		options.sharpness = p_params.sharpness;
+		StreamlineContext::get().slNISSetOptions(context->viewport, options);
 
-		{ // Tag NIS buffers
-			sl::Resource resources[3];
-			sl::ResourceTag resourceTags[3];
-			int numResources = 0;
+		sl::Resource resources[3];
+		sl::ResourceTag resource_tags[3];
+		int resource_count = 0;
+		assign_resource(resources, resource_tags, resource_count, p_params.output, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow);
+		assign_resource(resources, resource_tags, resource_count, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent);
 
-			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow);
-			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent);
+		sl::Result result = StreamlineContext::get().slSetTag(context->viewport, resource_tags, resource_count, native_cmdlist);
+		ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slSetTag for NIS. Result: " + String(StreamlineContext::result_to_string(result)));
 
-			sl::Result result = StreamlineContext::get().slSetTag(context->viewport, resourceTags, numResources, nativeCmdlist);
-			if (result != sl::Result::eOk) {
-				ERR_FAIL_MSG("Failed to call streamline slSetTag for NIS. Result: " + String(StreamlineContext::result_to_string(result)));
-			}
-		}
-
-		{ // Evaluate NIS
-			const sl::BaseStructure *inputs[] = { &context->viewport };
-			sl::Result result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureNIS, *StreamlineContext::get().last_token, inputs, 1, nativeCmdlist);
-			if (result != sl::Result::eOk) {
-				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for NIS. Result: " + String(StreamlineContext::result_to_string(result)));
-			}
-		}
+		const sl::BaseStructure *inputs[] = { &context->viewport };
+		result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureNIS, *StreamlineContext::get().last_token, inputs, 1, native_cmdlist);
+		ERR_FAIL_COND_MSG(result != sl::Result::eOk, "Failed to call streamline slEvaluateFeature for NIS. Result: " + String(StreamlineContext::result_to_string(result)));
 	}
 }
+#else
+void DLSSEffect::_upscale_internal_streamline(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {}
+#endif
 
-void RendererRD::DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
-	DLSSContextInner *self = (DLSSContextInner *)p_userdata;
+#ifdef DLSS_NGX_ENABLED
+void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {
+	DLSSContextNgx *context = (DLSSContextNgx *)p_params.context;
+	if (!ngx_ensure_initialized()) {
+		return;
+	}
+
+	VkCommandBuffer command_buffer = (VkCommandBuffer)RD::get_singleton()->get_device_driver()->command_buffer_get_native_handle(p_cmdid);
+	ERR_FAIL_NULL(command_buffer);
+
+	const bool use_auto_exposure = p_params.exposure.is_null() || !p_params.exposure.is_valid();
+	const bool use_dlss_rr = p_params.dlss_rr;
+
+	if (context->runtime_parameters == nullptr) {
+		ERR_FAIL_MSG("NGX runtime parameters are not initialized.");
+	}
+
+	auto ensure_scratch_buffer = [&](NVSDK_NGX_Feature p_feature, uint32_t p_width, uint32_t p_height) {
+		context->runtime_parameters->Reset();
+		NVSDK_NGX_Parameter_SetUI(context->runtime_parameters, NVSDK_NGX_Parameter_Width, p_width);
+		NVSDK_NGX_Parameter_SetUI(context->runtime_parameters, NVSDK_NGX_Parameter_Height, p_height);
+		NVSDK_NGX_Parameter_SetUI(context->runtime_parameters, NVSDK_NGX_Parameter_OutWidth, context->output_width);
+		NVSDK_NGX_Parameter_SetUI(context->runtime_parameters, NVSDK_NGX_Parameter_OutHeight, context->output_height);
+		size_t scratch_size = 0;
+		NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_GetScratchBufferSize(p_feature, context->runtime_parameters, &scratch_size);
+		if (ngx_result_failed(result) || scratch_size == 0) {
+			return;
+		}
+		if (context->scratch_size >= scratch_size && context->scratch_buffer.is_valid()) {
+			return;
+		}
+		if (context->scratch_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(context->scratch_buffer);
+			context->scratch_buffer = RID();
+		}
+		context->scratch_buffer = RD::get_singleton()->storage_buffer_create(uint32_t(scratch_size));
+		context->scratch_size = scratch_size;
+	};
+
+	auto create_feature_if_needed = [&](bool p_ray_reconstruction) {
+		NVSDK_NGX_Handle *&handle = p_ray_reconstruction ? context->dlssd_handle : context->dlss_handle;
+		if (handle != nullptr) {
+			return;
+		}
+
+		const NVSDK_NGX_Feature feature_id = p_ray_reconstruction ? NVSDK_NGX_Feature_RayReconstruction : NVSDK_NGX_Feature_SuperSampling;
+		ensure_scratch_buffer(feature_id, context->render_width, context->render_height);
+
+		context->runtime_parameters->Reset();
+		if (context->scratch_buffer.is_valid()) {
+			NVSDK_NGX_Parameter_SetVoidPointer(context->runtime_parameters, NVSDK_NGX_Parameter_Scratch, (void *)RD::get_singleton()->get_driver_resource(RD::DRIVER_RESOURCE_BUFFER, context->scratch_buffer));
+			NVSDK_NGX_Parameter_SetULL(context->runtime_parameters, NVSDK_NGX_Parameter_Scratch_SizeInBytes, context->scratch_size);
+		}
+
+		NVSDK_NGX_Result result;
+		if (p_ray_reconstruction) {
+			NVSDK_NGX_DLSSD_Create_Params create_params = {};
+			create_params.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+			create_params.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed;
+			create_params.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_HW;
+			create_params.InWidth = context->render_width;
+			create_params.InHeight = context->render_height;
+			create_params.InTargetWidth = context->output_width;
+			create_params.InTargetHeight = context->output_height;
+			create_params.InPerfQualityValue = context->perf_quality;
+			create_params.InFeatureCreateFlags = ngx_make_feature_flags(p_params.reverse_depth, use_auto_exposure);
+			create_params.InEnableOutputSubrects = false;
+			result = NGX_VULKAN_CREATE_DLSSD_EXT1(g_dlss_ngx_state.device, command_buffer, 1, 1, &handle, context->runtime_parameters, &create_params);
+		} else {
+			NVSDK_NGX_DLSS_Create_Params create_params = {};
+			create_params.Feature.InWidth = context->render_width;
+			create_params.Feature.InHeight = context->render_height;
+			create_params.Feature.InTargetWidth = context->output_width;
+			create_params.Feature.InTargetHeight = context->output_height;
+			create_params.Feature.InPerfQualityValue = context->perf_quality;
+			create_params.InFeatureCreateFlags = ngx_make_feature_flags(p_params.reverse_depth, use_auto_exposure);
+			create_params.InEnableOutputSubrects = false;
+			result = NGX_VULKAN_CREATE_DLSS_EXT1(g_dlss_ngx_state.device, command_buffer, 1, 1, &handle, context->runtime_parameters, &create_params);
+		}
+
+		ERR_FAIL_COND_MSG(ngx_result_failed(result), "Failed to create NGX feature: " + ngx_result_to_string(result));
+	};
+
+	create_feature_if_needed(use_dlss_rr);
+
+	context->runtime_parameters->Reset();
+	if (context->scratch_buffer.is_valid()) {
+		NVSDK_NGX_Parameter_SetVoidPointer(context->runtime_parameters, NVSDK_NGX_Parameter_Scratch, (void *)RD::get_singleton()->get_driver_resource(RD::DRIVER_RESOURCE_BUFFER, context->scratch_buffer));
+		NVSDK_NGX_Parameter_SetULL(context->runtime_parameters, NVSDK_NGX_Parameter_Scratch_SizeInBytes, context->scratch_size);
+	}
+
+	fill_matrix_array(Projection(p_params.cam_transform.affine_inverse()), context->world_to_view);
+	fill_matrix_array(p_params.cam_projection, context->view_to_clip);
+
+	NVSDK_NGX_Resource_VK color_resource = ngx_texture_to_resource(p_params.color);
+	NVSDK_NGX_Resource_VK output_resource = ngx_texture_to_resource(p_params.output, true);
+	NVSDK_NGX_Resource_VK depth_resource = ngx_texture_to_resource(p_params.depth);
+	NVSDK_NGX_Resource_VK velocity_resource = ngx_texture_to_resource(p_params.velocity);
+	NVSDK_NGX_Resource_VK exposure_resource = {};
+	NVSDK_NGX_Resource_VK diffuse_resource = {};
+	NVSDK_NGX_Resource_VK specular_resource = {};
+	NVSDK_NGX_Resource_VK normal_roughness_resource = {};
+	NVSDK_NGX_Resource_VK specular_hit_dist_resource = {};
+
+	NVSDK_NGX_Resource_VK *exposure_ptr = nullptr;
+	if (p_params.exposure.is_valid()) {
+		exposure_resource = ngx_texture_to_resource(p_params.exposure);
+		exposure_ptr = &exposure_resource;
+	}
+
+	NVSDK_NGX_Result result;
+	if (use_dlss_rr) {
+		diffuse_resource = ngx_texture_to_resource(p_params.dlss_rr_diffuse_albedo);
+		specular_resource = ngx_texture_to_resource(p_params.dlss_rr_specular_albedo);
+		normal_roughness_resource = ngx_texture_to_resource(p_params.dlss_rr_normal_roughness);
+		specular_hit_dist_resource = ngx_texture_to_resource(p_params.dlss_rr_specular_hit_dist);
+
+		NVSDK_NGX_VK_DLSSD_Eval_Params eval_params = {};
+		eval_params.pInDiffuseAlbedo = &diffuse_resource;
+		eval_params.pInSpecularAlbedo = &specular_resource;
+		eval_params.pInNormals = &normal_roughness_resource;
+		eval_params.pInRoughness = &normal_roughness_resource;
+		eval_params.pInColor = &color_resource;
+		eval_params.pInOutput = &output_resource;
+		eval_params.pInDepth = &depth_resource;
+		eval_params.pInMotionVectors = &velocity_resource;
+		eval_params.pInExposureTexture = exposure_ptr;
+		eval_params.pInSpecularHitDistance = &specular_hit_dist_resource;
+		eval_params.InJitterOffsetX = p_params.jitter.x;
+		eval_params.InJitterOffsetY = p_params.jitter.y;
+		eval_params.InRenderSubrectDimensions.Width = p_params.internal_size.width;
+		eval_params.InRenderSubrectDimensions.Height = p_params.internal_size.height;
+		eval_params.InReset = p_params.reset_accumulation ? 1 : 0;
+		eval_params.InMVScaleX = 1.0f;
+		eval_params.InMVScaleY = 1.0f;
+		eval_params.InPreExposure = 1.0f;
+		eval_params.InExposureScale = 1.0f;
+		eval_params.InFrameTimeDeltaInMsec = p_params.delta_time * 1000.0f;
+		eval_params.pInWorldToViewMatrix = context->world_to_view;
+		eval_params.pInViewToClipMatrix = context->view_to_clip;
+
+		result = NGX_VULKAN_EVALUATE_DLSSD_EXT(command_buffer, context->dlssd_handle, context->runtime_parameters, &eval_params);
+		ERR_FAIL_COND_MSG(ngx_result_failed(result), "Failed to evaluate NGX DLSS Ray Reconstruction: " + ngx_result_to_string(result));
+	} else {
+		NVSDK_NGX_VK_DLSS_Eval_Params eval_params = {};
+		eval_params.Feature.pInColor = &color_resource;
+		eval_params.Feature.pInOutput = &output_resource;
+		eval_params.Feature.InSharpness = p_params.sharpness;
+		eval_params.pInDepth = &depth_resource;
+		eval_params.pInMotionVectors = &velocity_resource;
+		eval_params.pInExposureTexture = exposure_ptr;
+		eval_params.InJitterOffsetX = p_params.jitter.x;
+		eval_params.InJitterOffsetY = p_params.jitter.y;
+		eval_params.InRenderSubrectDimensions.Width = p_params.internal_size.width;
+		eval_params.InRenderSubrectDimensions.Height = p_params.internal_size.height;
+		eval_params.InReset = p_params.reset_accumulation ? 1 : 0;
+		eval_params.InMVScaleX = 1.0f;
+		eval_params.InMVScaleY = 1.0f;
+		eval_params.InPreExposure = 1.0f;
+		eval_params.InExposureScale = 1.0f;
+		eval_params.InFrameTimeDeltaInMsec = p_params.delta_time * 1000.0f;
+
+		result = NGX_VULKAN_EVALUATE_DLSS_EXT(command_buffer, context->dlss_handle, context->runtime_parameters, &eval_params);
+		ERR_FAIL_COND_MSG(ngx_result_failed(result), "Failed to evaluate NGX DLSS Super Resolution: " + ngx_result_to_string(result));
+	}
+}
+#else
+void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {}
+#endif
+
+void DLSSEffect::_upscale_internal(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {
+	DLSSContext *context = p_params.context;
+	if (context == nullptr) {
+		return;
+	}
+
+#ifdef DLSS_STREAMLINE_ENABLED
+	if (context->backend_type == DLSSContext::BACKEND_STREAMLINE) {
+		_upscale_internal_streamline(p_cmdid, p_params);
+		return;
+	}
+#endif
+
+#ifdef DLSS_NGX_ENABLED
+	if (context->backend_type == DLSSContext::BACKEND_NGX) {
+		_upscale_internal_ngx(p_cmdid, p_params);
+		return;
+	}
+#endif
+}
+
+void DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
+	DLSSContext *self = (DLSSContext *)p_userdata;
 	self->last_effect->_upscale_internal(p_command_buffer, self->last_parameters);
 }
 
 bool DLSSEffect::is_ready(DLSSContext *p_context) {
-	DLSSContextInner *context = (DLSSContextInner *)p_context;
-	if (context->currentDlssOptions.mode == sl::DLSSMode::eOff) {
-		return false; // unsupported mode.
+	if (p_context == nullptr || p_context->delay > 0) {
+		return false;
 	}
-	if (context->delay > 0) {
-		return false; // still in delay mode
+
+#ifdef DLSS_STREAMLINE_ENABLED
+	if (p_context->backend_type == DLSSContext::BACKEND_STREAMLINE) {
+		DLSSContextStreamline *context = (DLSSContextStreamline *)p_context;
+		return context->current_dlss_options.mode != sl::DLSSMode::eOff;
 	}
-	return true;
+#endif
+
+#ifdef DLSS_NGX_ENABLED
+	if (p_context->backend_type == DLSSContext::BACKEND_NGX) {
+		return true;
+	}
+#endif
+
+	return false;
 }
+
 #else
+
 DLSSEffect::DLSSEffect() {}
 DLSSEffect::~DLSSEffect() {}
 DLSSContext *DLSSEffect::create_context(Size2i p_internal_size, Size2i p_target_size) {
@@ -588,6 +1063,9 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {}
 bool DLSSEffect::is_ready(DLSSContext *p_context) {
 	return false;
 }
-void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params) {}
+void DLSSEffect::_upscale_internal(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {}
+void DLSSEffect::_upscale_internal_streamline(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {}
+void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSContext::Parameters &p_params) {}
 void DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {}
+
 #endif

@@ -39,6 +39,12 @@ namespace RendererRD {
 class DLSSEffect;
 class DLSSContext {
 public:
+	enum BackendType {
+		BACKEND_NONE,
+		BACKEND_STREAMLINE,
+		BACKEND_NGX,
+	};
+
 	struct Parameters {
 		DLSSContext *context;
 		Size2i internal_size;
@@ -70,6 +76,7 @@ public:
 		RID dlss_rr_specular_hit_dist; // Specular hit distance (R16F, -1 = sky)
 	} last_parameters;
 	DLSSEffect *last_effect = nullptr;
+	BackendType backend_type = BACKEND_NONE;
 	bool is_d3d12 = false;
 	int delay = 4; // Warmup frames before DLSS evaluates (Vulkan stability workaround).
 
@@ -92,7 +99,11 @@ public:
 
 private:
 	void _upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params);
+	void _upscale_internal_streamline(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params);
+	void _upscale_internal_ngx(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params);
 	static void _upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata);
+
+	DLSSContext::BackendType backend_type = DLSSContext::BACKEND_NONE;
 };
 
 } // namespace RendererRD
