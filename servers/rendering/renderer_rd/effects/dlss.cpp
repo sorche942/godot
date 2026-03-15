@@ -1174,8 +1174,9 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 		eval_params.InRenderSubrectDimensions.Width = p_params.internal_size.width;
 		eval_params.InRenderSubrectDimensions.Height = p_params.internal_size.height;
 		eval_params.InReset = p_params.reset_accumulation ? 1 : 0;
-		eval_params.InMVScaleX = 1.0f;
-		eval_params.InMVScaleY = 1.0f;
+		// Motion vectors are in UV space (0-1); scale to pixel space for DLSS.
+		eval_params.InMVScaleX = (float)p_params.internal_size.width;
+		eval_params.InMVScaleY = (float)p_params.internal_size.height;
 		eval_params.InPreExposure = 1.0f;
 		eval_params.InExposureScale = 1.0f;
 		eval_params.InFrameTimeDeltaInMsec = p_params.delta_time * 1000.0f;
@@ -1197,8 +1198,9 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 		eval_params.InRenderSubrectDimensions.Width = p_params.internal_size.width;
 		eval_params.InRenderSubrectDimensions.Height = p_params.internal_size.height;
 		eval_params.InReset = p_params.reset_accumulation ? 1 : 0;
-		eval_params.InMVScaleX = 1.0f;
-		eval_params.InMVScaleY = 1.0f;
+		// Motion vectors are in UV space (0-1); scale to pixel space for DLSS.
+		eval_params.InMVScaleX = (float)p_params.internal_size.width;
+		eval_params.InMVScaleY = (float)p_params.internal_size.height;
 		eval_params.InPreExposure = 1.0f;
 		eval_params.InExposureScale = 1.0f;
 		eval_params.InFrameTimeDeltaInMsec = p_params.delta_time * 1000.0f;
