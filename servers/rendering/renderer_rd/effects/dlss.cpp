@@ -35,6 +35,9 @@
 #include "core/os/os.h"
 #include "core/version.h"
 #include <stdio.h>
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
 
 #ifdef DLSS_STREAMLINE_ENABLED
 #include "drivers/streamline/streamline_context.h"
@@ -197,6 +200,17 @@ static void ngx_add_feature_path(DlssNgxState &r_state, const String &p_path) {
 	r_state.feature_path_ptrs.push_back((const wchar_t *)path_buffer.ptr());
 }
 
+static void NVSDK_CONV ngx_log_callback(const char *message, NVSDK_NGX_Logging_Level loggingLevel, NVSDK_NGX_Feature sourceComponent) {
+	const char *level_str = "?";
+	switch (loggingLevel) {
+		case NVSDK_NGX_LOGGING_LEVEL_OFF: level_str = "OFF"; break;
+		case NVSDK_NGX_LOGGING_LEVEL_ON: level_str = "ON"; break;
+		case NVSDK_NGX_LOGGING_LEVEL_VERBOSE: level_str = "VERBOSE"; break;
+		default: break;
+	}
+	print_line(vformat("[NGX feature=%d %s] %s", int(sourceComponent), level_str, String(message)));
+}
+
 static void ngx_setup_feature_info(DlssNgxState &r_state) {
 	if (!r_state.feature_path_ptrs.is_empty()) {
 		return;
@@ -212,6 +226,9 @@ static void ngx_setup_feature_info(DlssNgxState &r_state) {
 		r_state.feature_common_info.PathListInfo.Path = r_state.feature_path_ptrs.ptr();
 		r_state.feature_common_info.PathListInfo.Length = r_state.feature_path_ptrs.size();
 	}
+	r_state.feature_common_info.LoggingInfo.LoggingCallback = ngx_log_callback;
+	r_state.feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+	r_state.feature_common_info.LoggingInfo.DisableOtherLoggingSinks = false;
 }
 
 static bool ngx_ensure_initialized() {
@@ -240,6 +257,27 @@ static bool ngx_ensure_initialized() {
 	ngx_log_required_extensions();
 	ngx_debug_log(vformat("NGX init begin. data_path=%s feature_paths=%d", ngx_data_path, g_dlss_ngx_state.feature_path_ptrs.size()));
 
+	// Resolve Vulkan proc addr functions for NGX. DLSS-D (ray reconstruction)
+	// needs these to load advanced Vulkan extension functions internally.
+	// With Volk, the global function pointers may not be suitable, so load
+	// the raw function from the Vulkan loader via dlsym.
+	PFN_vkGetInstanceProcAddr gipa = nullptr;
+	PFN_vkGetDeviceProcAddr gdpa = nullptr;
+#ifdef __linux__
+	{
+		void *vk_lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_NOLOAD);
+		if (!vk_lib) {
+			vk_lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_NOLOAD);
+		}
+		if (vk_lib) {
+			gipa = (PFN_vkGetInstanceProcAddr)dlsym(vk_lib, "vkGetInstanceProcAddr");
+			gdpa = (PFN_vkGetDeviceProcAddr)dlsym(vk_lib, "vkGetDeviceProcAddr");
+			dlclose(vk_lib);
+		}
+	}
+#endif
+	ngx_debug_log(vformat("NGX Vulkan proc addrs: gipa=%s gdpa=%s", gipa ? "loaded" : "null", gdpa ? "loaded" : "null"));
+
 	NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_Init_with_ProjectID(
 			DLSS_NGX_PROJECT_ID,
 			NVSDK_NGX_ENGINE_TYPE_CUSTOM,
@@ -248,8 +286,8 @@ static bool ngx_ensure_initialized() {
 			g_dlss_ngx_state.instance,
 			g_dlss_ngx_state.physical_device,
 			g_dlss_ngx_state.device,
-			nullptr,
-			nullptr,
+			gipa,
+			gdpa,
 			&g_dlss_ngx_state.feature_common_info,
 			NVSDK_NGX_Version_API);
 	if (ngx_result_failed(result)) {
@@ -296,8 +334,12 @@ static NVSDK_NGX_PerfQuality_Value ngx_select_perf_quality(uint32_t p_output_wid
 	return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
 }
 
-static int ngx_make_feature_flags(bool p_reverse_depth, bool p_auto_exposure) {
+static int ngx_make_feature_flags(bool p_reverse_depth, bool p_auto_exposure, bool p_ray_reconstruction = false) {
 	int flags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
+	if (p_ray_reconstruction) {
+		// DLSS-D requires low-res motion vectors (rendered at internal resolution).
+		flags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+	}
 	if (p_reverse_depth) {
 		flags |= NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
 	}
@@ -305,6 +347,88 @@ static int ngx_make_feature_flags(bool p_reverse_depth, bool p_auto_exposure) {
 		flags |= NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
 	}
 	return flags;
+}
+
+// Query DLSS-D optimal settings to find the correct quality mode for the given
+// render/output resolution. Uses capability parameters with the
+// DLSSDOptimalSettingsCallback from the DLSS-D library. Returns true if a valid
+// mode was found. Falls back to heuristic if the callback is unavailable.
+static bool ngx_dlssd_query_quality_mode(
+		uint32_t p_output_width, uint32_t p_output_height,
+		uint32_t p_render_width, uint32_t p_render_height,
+		NVSDK_NGX_PerfQuality_Value &r_quality) {
+	NVSDK_NGX_Parameter *cap_params = nullptr;
+	NVSDK_NGX_Result cap_result = NVSDK_NGX_VULKAN_GetCapabilityParameters(&cap_params);
+	if (ngx_result_failed(cap_result) || cap_params == nullptr) {
+		r_quality = ngx_select_perf_quality(p_output_width, p_output_height, p_render_width, p_render_height);
+		return true;
+	}
+
+	const NVSDK_NGX_PerfQuality_Value modes[] = {
+		NVSDK_NGX_PerfQuality_Value_DLAA,
+		NVSDK_NGX_PerfQuality_Value_UltraQuality,
+		NVSDK_NGX_PerfQuality_Value_MaxQuality,
+		NVSDK_NGX_PerfQuality_Value_Balanced,
+		NVSDK_NGX_PerfQuality_Value_MaxPerf,
+		NVSDK_NGX_PerfQuality_Value_UltraPerformance,
+	};
+	const char *mode_names[] = { "DLAA", "UltraQuality", "MaxQuality", "Balanced", "MaxPerf", "UltraPerf" };
+	constexpr int mode_count = sizeof(modes) / sizeof(modes[0]);
+
+	float best_distance = 1e30f;
+	NVSDK_NGX_PerfQuality_Value best_mode = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+	bool found_valid = false;
+	String debug_info;
+
+	for (int i = 0; i < mode_count; i++) {
+		unsigned int opt_w = 0, opt_h = 0, max_w = 0, max_h = 0, min_w = 0, min_h = 0;
+		float sharpness = 0.0f;
+		NVSDK_NGX_Result opt_result = NGX_DLSSD_GET_OPTIMAL_SETTINGS(
+				cap_params, p_output_width, p_output_height, modes[i],
+				&opt_w, &opt_h, &max_w, &max_h, &min_w, &min_h, &sharpness);
+
+		if (ngx_result_failed(opt_result) || opt_w == 0 || opt_h == 0) {
+			debug_info += vformat(" %s=unsupported", mode_names[i]);
+			continue;
+		}
+
+		debug_info += vformat(" %s=opt(%dx%d)range(%dx%d-%dx%d)", mode_names[i], opt_w, opt_h, min_w, min_h, max_w, max_h);
+
+		if (p_render_width >= min_w && p_render_width <= max_w &&
+				p_render_height >= min_h && p_render_height <= max_h) {
+			float dist = Math::abs((float)opt_w - (float)p_render_width) +
+					Math::abs((float)opt_h - (float)p_render_height);
+			if (!found_valid || dist < best_distance) {
+				best_distance = dist;
+				best_mode = modes[i];
+				found_valid = true;
+			}
+		}
+	}
+
+	print_line(vformat("DLSS-D optimal settings query (render=%dx%d output=%dx%d):%s => %s",
+			p_render_width, p_render_height, p_output_width, p_output_height,
+			debug_info, found_valid ? vformat("selected mode %d", int(best_mode)) : "no valid mode"));
+
+	if (found_valid) {
+		r_quality = best_mode;
+	}
+	return found_valid;
+}
+
+// Map a preset character ('D', 'E', etc.) to the NGX RayReconstruction hint
+// render preset enum value and set it on the parameter object for all quality modes.
+static void ngx_set_rr_presets(NVSDK_NGX_Parameter *p_params, char p_preset) {
+	int preset_value = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default;
+	if (p_preset >= 'D' && p_preset <= 'O') {
+		preset_value = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D + (p_preset - 'D');
+	}
+	NVSDK_NGX_Parameter_SetI(p_params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA, preset_value);
+	NVSDK_NGX_Parameter_SetI(p_params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality, preset_value);
+	NVSDK_NGX_Parameter_SetI(p_params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced, preset_value);
+	NVSDK_NGX_Parameter_SetI(p_params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance, preset_value);
+	NVSDK_NGX_Parameter_SetI(p_params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance, preset_value);
+	NVSDK_NGX_Parameter_SetI(p_params, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality, preset_value);
 }
 
 static NVSDK_NGX_Resource_VK ngx_texture_to_resource(RID p_texture, bool p_write_access = false) {
@@ -443,6 +567,7 @@ public:
 	NVSDK_NGX_Parameter *runtime_parameters = nullptr;
 	NVSDK_NGX_Handle *dlss_handle = nullptr;
 	NVSDK_NGX_Handle *dlssd_handle = nullptr;
+	bool dlssd_creation_failed = false; // Set to true on first creation failure to avoid per-frame retries.
 	RID scratch_buffer;
 	size_t scratch_size = 0;
 	uint32_t render_width = 0;
@@ -624,10 +749,10 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 	add_resource(p_params.velocity, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
 	add_resource(p_params.exposure, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
 	if (p_params.dlss_rr) {
-		add_resource(p_params.dlss_rr_diffuse_albedo, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
-		add_resource(p_params.dlss_rr_specular_albedo, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
-		add_resource(p_params.dlss_rr_normal_roughness, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
-		add_resource(p_params.dlss_rr_specular_hit_dist, RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE);
+		add_resource(p_params.dlss_rr_diffuse_albedo, RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+		add_resource(p_params.dlss_rr_specular_albedo, RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+		add_resource(p_params.dlss_rr_normal_roughness, RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+		add_resource(p_params.dlss_rr_specular_hit_dist, RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
 	}
 
 	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, base_context, VectorView<RD::CallbackResource>(resources, resource_count));
@@ -861,6 +986,7 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 		size_t scratch_size = 0;
 		NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_GetScratchBufferSize(p_feature, context->runtime_parameters, &scratch_size);
 		if (ngx_result_failed(result) || scratch_size == 0) {
+			ngx_debug_log(vformat("GetScratchBufferSize failed for feature %d: %s (scratch_size=%d)", int(p_feature), ngx_result_to_string(result), (int)scratch_size));
 			return;
 		}
 		if (context->scratch_size >= scratch_size && context->scratch_buffer.is_valid()) {
@@ -879,6 +1005,33 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 		if (handle != nullptr) {
 			return;
 		}
+		if (p_ray_reconstruction && context->dlssd_creation_failed) {
+			return; // Don't retry a permanently failed creation.
+		}
+
+		// Check DLSS-D preconditions before attempting creation.
+		if (p_ray_reconstruction) {
+			NVSDK_NGX_Parameter *cap_params = nullptr;
+			NVSDK_NGX_Result cap_result = NVSDK_NGX_VULKAN_GetCapabilityParameters(&cap_params);
+			if (!ngx_result_failed(cap_result) && cap_params != nullptr) {
+				int available = 0;
+				NVSDK_NGX_Parameter_GetI(cap_params, NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &available);
+				if (!available) {
+					int needs_driver = 0;
+					unsigned int min_major = 0, min_minor = 0;
+					NVSDK_NGX_Parameter_GetI(cap_params, NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver, &needs_driver);
+					NVSDK_NGX_Parameter_GetUI(cap_params, NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMajor, &min_major);
+					NVSDK_NGX_Parameter_GetUI(cap_params, NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMinor, &min_minor);
+					if (needs_driver) {
+						ERR_PRINT_ONCE(vformat("DLSS Ray Reconstruction not available: driver update required (minimum %d.%d).", min_major, min_minor));
+					} else {
+						ERR_PRINT_ONCE("DLSS Ray Reconstruction not available on this GPU/driver. The feature model may not be installed.");
+					}
+					context->dlssd_creation_failed = true;
+					return;
+				}
+			}
+		}
 
 		const NVSDK_NGX_Feature feature_id = p_ray_reconstruction ? NVSDK_NGX_Feature_RayReconstruction : NVSDK_NGX_Feature_SuperSampling;
 		ensure_scratch_buffer(feature_id, context->render_width, context->render_height);
@@ -891,6 +1044,23 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 
 		NVSDK_NGX_Result result;
 		if (p_ray_reconstruction) {
+			// Query DLSS-D optimal settings to find the correct quality mode.
+			// The DLSS-D library strictly validates that InPerfQualityValue matches
+			// the render/output resolution ratio and rejects mismatches.
+			NVSDK_NGX_PerfQuality_Value dlssd_quality;
+			if (!ngx_dlssd_query_quality_mode(context->output_width, context->output_height,
+						context->render_width, context->render_height, dlssd_quality)) {
+				ERR_PRINT_ONCE(vformat("DLSS Ray Reconstruction: no valid quality mode for render=%dx%d output=%dx%d. "
+						"Try a different DLSS scaling mode.",
+						context->render_width, context->render_height,
+						context->output_width, context->output_height));
+				context->dlssd_creation_failed = true;
+				return;
+			}
+
+			// Set RayReconstruction hint render presets before feature creation.
+			ngx_set_rr_presets(context->runtime_parameters, p_params.preset);
+
 			NVSDK_NGX_DLSSD_Create_Params create_params = {};
 			create_params.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
 			create_params.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed;
@@ -899,9 +1069,15 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 			create_params.InHeight = context->render_height;
 			create_params.InTargetWidth = context->output_width;
 			create_params.InTargetHeight = context->output_height;
-			create_params.InPerfQualityValue = context->perf_quality;
-			create_params.InFeatureCreateFlags = ngx_make_feature_flags(p_params.reverse_depth, use_auto_exposure);
+			create_params.InPerfQualityValue = dlssd_quality;
+			create_params.InFeatureCreateFlags = ngx_make_feature_flags(p_params.reverse_depth, use_auto_exposure, true);
 			create_params.InEnableOutputSubrects = false;
+
+			print_line(vformat("DLSS-D creating feature: render=%dx%d output=%dx%d quality=%d preset='%c' flags=0x%x",
+					context->render_width, context->render_height,
+					context->output_width, context->output_height,
+					int(dlssd_quality), p_params.preset, create_params.InFeatureCreateFlags));
+
 			result = NGX_VULKAN_CREATE_DLSSD_EXT1(g_dlss_ngx_state.device, command_buffer, 1, 1, &handle, context->runtime_parameters, &create_params);
 		} else {
 			NVSDK_NGX_DLSS_Create_Params create_params = {};
@@ -915,10 +1091,30 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 			result = NGX_VULKAN_CREATE_DLSS_EXT1(g_dlss_ngx_state.device, command_buffer, 1, 1, &handle, context->runtime_parameters, &create_params);
 		}
 
-		ERR_FAIL_COND_MSG(ngx_result_failed(result), "Failed to create NGX feature: " + ngx_result_to_string(result));
+		if (ngx_result_failed(result)) {
+			if (p_ray_reconstruction) {
+				ERR_PRINT_ONCE("DLSS Ray Reconstruction: failed to create NGX feature: " + ngx_result_to_string(result) +
+						vformat(" (render=%dx%d output=%dx%d)",
+								context->render_width, context->render_height,
+								context->output_width, context->output_height));
+				context->dlssd_creation_failed = true;
+			} else {
+				ERR_PRINT("DLSS SR: failed to create NGX feature: " + ngx_result_to_string(result));
+			}
+			return;
+		}
 	};
 
 	create_feature_if_needed(use_dlss_rr);
+
+	if (use_dlss_rr && context->dlssd_handle == nullptr) {
+		ERR_PRINT_ONCE("DLSS RR: feature handle is null after creation attempt; DLSS-RR may not be supported on this GPU/driver.");
+		return;
+	}
+	if (!use_dlss_rr && context->dlss_handle == nullptr) {
+		ERR_PRINT_ONCE("DLSS SR: feature handle is null after creation attempt.");
+		return;
+	}
 
 	context->runtime_parameters->Reset();
 	if (context->scratch_buffer.is_valid()) {
@@ -947,6 +1143,16 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 
 	NVSDK_NGX_Result result;
 	if (use_dlss_rr) {
+		static bool dlss_rr_first_eval = true;
+		if (dlss_rr_first_eval) {
+			print_line("DLSS-RR: first evaluation, handle=", (void *)context->dlssd_handle,
+					" diffuse_valid=", p_params.dlss_rr_diffuse_albedo.is_valid(),
+					" specular_valid=", p_params.dlss_rr_specular_albedo.is_valid(),
+					" normal_valid=", p_params.dlss_rr_normal_roughness.is_valid(),
+					" hitdist_valid=", p_params.dlss_rr_specular_hit_dist.is_valid());
+			dlss_rr_first_eval = false;
+		}
+
 		diffuse_resource = ngx_texture_to_resource(p_params.dlss_rr_diffuse_albedo);
 		specular_resource = ngx_texture_to_resource(p_params.dlss_rr_specular_albedo);
 		normal_roughness_resource = ngx_texture_to_resource(p_params.dlss_rr_normal_roughness);
