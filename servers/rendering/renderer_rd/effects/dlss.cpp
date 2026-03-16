@@ -1136,7 +1136,12 @@ void DLSSEffect::_upscale_internal_ngx(RDD::CommandBufferID p_cmdid, const DLSSC
 	}
 
 	fill_matrix_array(Projection(p_params.cam_transform.affine_inverse()), context->world_to_view);
-	fill_matrix_array(p_params.cam_projection, context->view_to_clip);
+	// Apply Y-flip and Z-remap to match the Vulkan depth buffer convention [0,1].
+	// reverse_z is intentionally excluded here: the DepthInverted feature flag handles
+	// the 1=near/0=far reversal separately, so the matrix should map near→0, far→1.
+	Projection depth_correction;
+	depth_correction.set_depth_correction(true /*flip_y*/, false /*reverse_z*/, true /*remap_z to [0,1]*/);
+	fill_matrix_array(depth_correction * p_params.cam_projection, context->view_to_clip);
 
 	NVSDK_NGX_Resource_VK color_resource = ngx_texture_to_resource(p_params.color);
 	NVSDK_NGX_Resource_VK output_resource = ngx_texture_to_resource(p_params.output, true);
