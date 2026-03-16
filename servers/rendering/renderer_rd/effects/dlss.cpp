@@ -117,7 +117,6 @@ static sl::float3 sl_convert_vector(const Vector3 &p_vector) {
 
 #ifdef DLSS_NGX_ENABLED
 static const char *const DLSS_NGX_PROJECT_ID = "f5d967b4-cf10-49fe-8f55-7c3f8b3d92d3";
-static const char *const DLSS_NGX_ENABLE_ENV = "GODOT_DLSS_NGX_ENABLE";
 
 struct DlssNgxState {
 	bool init_attempted = false;
@@ -138,9 +137,23 @@ static void ngx_debug_log(const String &p_message) {
 	fflush(stderr);
 }
 
-static bool ngx_runtime_enabled() {
-	String enabled = OS::get_singleton()->get_environment(DLSS_NGX_ENABLE_ENV).strip_edges().to_lower();
-	return enabled == "1" || enabled == "true" || enabled == "yes";
+static bool ngx_libraries_available() {
+	String exe_dir = OS::get_singleton()->get_executable_path().get_base_dir();
+	Vector<String> search_paths;
+	search_paths.push_back(exe_dir);
+	search_paths.push_back(exe_dir.path_join("../references/DLSS/lib/Linux_x86_64/rel").simplify_path());
+	search_paths.push_back(exe_dir.path_join("../references/DLSS/lib/Linux_x86_64/dev").simplify_path());
+
+	for (const String &path : search_paths) {
+		String lib_path = path.path_join("libnvidia-ngx-dlss.so.310.5.3");
+		CharString lib_path_cs = lib_path.utf8();
+		void *handle = dlopen(lib_path_cs.get_data(), RTLD_LAZY | RTLD_LOCAL);
+		if (handle) {
+			dlclose(handle);
+			return true;
+		}
+	}
+	return false;
 }
 
 static String ngx_result_to_string(NVSDK_NGX_Result p_result) {
@@ -622,7 +635,7 @@ DLSSEffect::~DLSSEffect() {
 
 DLSSContext *DLSSEffect::create_context(Size2i p_internal_size, Size2i p_target_size) {
 #ifdef DLSS_NGX_ENABLED
-	if (backend_type == DLSSContext::BACKEND_NONE && RD::get_singleton()->get_device_api_name().to_lower() == "vulkan" && ngx_runtime_enabled()) {
+	if (backend_type == DLSSContext::BACKEND_NONE && RD::get_singleton()->get_device_api_name().to_lower() == "vulkan" && ngx_libraries_available()) {
 		backend_type = DLSSContext::BACKEND_NGX;
 	}
 #endif
