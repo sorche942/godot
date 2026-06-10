@@ -678,7 +678,7 @@ public:
 
 	virtual void environment_set_sdfgi(RID p_env, bool p_enable, int p_cascades, float p_min_cell_size, RSE::EnvironmentSDFGIYScale p_y_scale, bool p_use_occlusion, float p_bounce_feedback, bool p_read_sky, float p_energy, float p_normal_bias, float p_probe_bias) = 0;
 
-	virtual void environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance) = 0;
+	virtual void environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance, bool p_reflections, float p_reflections_max_roughness) = 0;
 
 	virtual void environment_set_sdfgi_ray_count(RSE::EnvironmentSDFGIRayCount p_ray_count) = 0;
 

@@ -40,6 +40,7 @@
 #include "servers/rendering/renderer_rd/shaders/environment/ddgi_blend.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/ddgi_probe_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/gi.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/rt_reflections.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_debug.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_debug_probes.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_direct_light.glsl.gen.h"
@@ -476,6 +477,13 @@ private:
 		DdgiProbeUpdateShaderRD probe_update;
 		RID probe_update_version;
 		RID probe_update_pipelines[PROBE_UPDATE_MODE_MAX];
+
+		RtReflectionsShaderRD reflections;
+		RID reflections_version;
+		RID reflections_shader;
+		RID reflections_pipeline;
+		RID reflections_hit_sbt;
+		RD::HitShaderBindingTableRange reflections_hit_sbt_range = 0;
 	} ddgi_shader;
 
 public:
@@ -813,10 +821,19 @@ public:
 		struct InstanceDataSSBO {
 			float xform[12]; // 3 rows of vec4.
 			uint32_t vertex_buffer_address[2];
-			uint32_t pad[2];
+			uint32_t albedo_tex_index; // Index into the albedo texture table, 0xFFFFFFFF if none.
+			uint32_t pad;
 			float albedo[4];
 			float emission[4];
+			float uv_scale_offset[4]; // Material uv1 scale.xy + offset.xy.
 		};
+
+		enum {
+			MAX_ALBEDO_TEXTURES = 32,
+		};
+
+		// Albedo texture table for hit shading, rebuilt every update.
+		LocalVector<RID> albedo_texture_table;
 
 		// Mirrors DDGILight in ddgi.glsl (std430).
 		struct Light {
@@ -865,6 +882,14 @@ public:
 		uint32_t instance_buffer_capacity = 0;
 		RID tlas;
 		uint32_t tlas_capacity = 0;
+
+		// Sky bindings captured during update() for the reflections pass.
+		RID last_sky_2d;
+		RID last_sky_array;
+
+		// Per-view parameter UBOs for the reflections pass (push constants are
+		// not reliable in raytracing lists yet).
+		RID reflections_params_ubo[RendererSceneRender::MAX_RENDER_VIEWS];
 
 		// Per-frame culled scene data, set by the renderer before render_scene.
 		const PagedArray<RenderGeometryInstance *> *pending_geometry_instances = nullptr;
@@ -1033,6 +1058,9 @@ public:
 
 	bool is_ddgi_supported() const { return ddgi_shader.available; }
 	Ref<DDGI> create_ddgi(RID p_env, const Vector3 &p_world_position);
+	// Raytraced reflections, using the DDGI volume's acceleration structure and
+	// probes. Runs after process_gi and refines the reflection buffer.
+	void process_rt_reflections(Ref<RenderSceneBuffersRD> p_render_buffers, RenderDataRD *p_render_data, const RID *p_normal_roughness_slices);
 
 	void setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, const Transform3D &p_transform, const PagedArray<RID> &p_voxel_gi_instances, uint32_t &r_voxel_gi_instances_used);
 	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances);

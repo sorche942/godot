@@ -3883,6 +3883,30 @@ void GI::init(SkyRD *p_sky) {
 				}
 			}
 
+			{
+				Vector<String> reflection_modes;
+				reflection_modes.push_back("");
+
+				ddgi_shader.reflections.initialize(reflection_modes);
+				ddgi_shader.reflections_version = ddgi_shader.reflections.version_create();
+				ddgi_shader.reflections_shader = ddgi_shader.reflections.version_get_shader(ddgi_shader.reflections_version, 0);
+
+				if (ddgi_shader.reflections_shader.is_valid()) {
+					RD::PipelineShader pipeline_shader;
+					pipeline_shader.shader = ddgi_shader.reflections_shader;
+					RD::HitGroup hit_group;
+					hit_group.closest_hit_shader.shader = ddgi_shader.reflections_shader;
+					ddgi_shader.reflections_pipeline = RD::get_singleton()->raytracing_pipeline_create(Span<RD::PipelineShader>(&pipeline_shader, 1), Span<RD::PipelineShader>(&pipeline_shader, 1), Span<RD::HitGroup>(&hit_group, 1), 1);
+				}
+
+				if (ddgi_shader.reflections_pipeline.is_valid()) {
+					ddgi_shader.reflections_hit_sbt = RD::get_singleton()->hit_sbt_create(ddgi_shader.reflections_pipeline, 1);
+					ddgi_shader.reflections_hit_sbt_range = RD::get_singleton()->hit_sbt_range_alloc(ddgi_shader.reflections_hit_sbt, 1);
+					uint32_t hit_group_index = 0;
+					RD::get_singleton()->hit_sbt_range_update(ddgi_shader.reflections_hit_sbt, ddgi_shader.reflections_hit_sbt_range, 0, Span<uint32_t>(&hit_group_index, 1));
+				}
+			}
+
 			ddgi_shader.available = true;
 		}
 	}
@@ -3927,6 +3951,15 @@ void GI::free() {
 	if (ddgi_shader.probe_update_version.is_valid()) {
 		ddgi_shader.probe_update.version_free(ddgi_shader.probe_update_version);
 	}
+	if (ddgi_shader.reflections_hit_sbt.is_valid()) {
+		RD::get_singleton()->free_rid(ddgi_shader.reflections_hit_sbt);
+	}
+	if (ddgi_shader.reflections_pipeline.is_valid()) {
+		RD::get_singleton()->free_rid(ddgi_shader.reflections_pipeline);
+	}
+	if (ddgi_shader.reflections_version.is_valid()) {
+		ddgi_shader.reflections.version_free(ddgi_shader.reflections_version);
+	}
 }
 
 Ref<GI::SDFGI> GI::create_sdfgi(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size) {
@@ -3955,6 +3988,9 @@ void GI::DDGI::create(RID p_env, const Vector3 &p_world_position, GI *p_gi) {
 
 	volume_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(VolumeDataUBO));
 	lights_buffer = RD::get_singleton()->storage_buffer_create(sizeof(Light) * MAX_LIGHTS);
+	for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
+		reflections_params_ubo[v] = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 8);
+	}
 
 	update_settings(p_env);
 
@@ -4160,10 +4196,16 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 
 	tlas_instances.clear();
 	instance_data.clear();
+	albedo_texture_table.clear();
 
 	static const StringName albedo_param_name = "albedo";
 	static const StringName emission_param_name = "emission";
 	static const StringName emission_energy_param_name = "emission_energy";
+	static const StringName albedo_texture_param_name = "texture_albedo";
+	static const StringName uv1_scale_param_name = "uv1_scale";
+	static const StringName uv1_offset_param_name = "uv1_offset";
+
+	HashMap<RID, uint32_t> albedo_texture_indices;
 
 	if (pending_geometry_instances != nullptr) {
 		for (uint64_t i = 0; i < pending_geometry_instances->size(); i++) {
@@ -4193,6 +4235,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				Color albedo(0.75, 0.75, 0.75);
 				Color emission(0, 0, 0);
 				float emission_energy = 1.0;
+				uint32_t albedo_tex_index = 0xFFFFFFFF;
+				Vector3 uv1_scale(1, 1, 1);
+				Vector3 uv1_offset(0, 0, 0);
 
 				RID material = inst->data->material_override;
 				if (material.is_null() && (int)s < inst->data->surface_materials.size()) {
@@ -4213,6 +4258,30 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 					Variant emission_energy_v = material_storage->material_get_param(material, emission_energy_param_name);
 					if (emission_energy_v.get_type() == Variant::FLOAT) {
 						emission_energy = emission_energy_v;
+					}
+
+					Variant uv1_scale_v = material_storage->material_get_param(material, uv1_scale_param_name);
+					if (uv1_scale_v.get_type() == Variant::VECTOR3) {
+						uv1_scale = uv1_scale_v;
+					}
+					Variant uv1_offset_v = material_storage->material_get_param(material, uv1_offset_param_name);
+					if (uv1_offset_v.get_type() == Variant::VECTOR3) {
+						uv1_offset = uv1_offset_v;
+					}
+
+					RID albedo_tex = material_storage->material_get_param(material, albedo_texture_param_name);
+					if (albedo_tex.is_valid()) {
+						HashMap<RID, uint32_t>::Iterator E = albedo_texture_indices.find(albedo_tex);
+						if (E) {
+							albedo_tex_index = E->value;
+						} else if (albedo_texture_table.size() < MAX_ALBEDO_TEXTURES) {
+							RID rd_tex = texture_storage->texture_get_rd_texture(albedo_tex, true);
+							if (rd_tex.is_valid()) {
+								albedo_tex_index = albedo_texture_table.size();
+								albedo_texture_table.push_back(rd_tex);
+								albedo_texture_indices.insert(albedo_tex, albedo_tex_index);
+							}
+						}
 					}
 				}
 
@@ -4237,6 +4306,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				}
 				data.vertex_buffer_address[0] = rt_data.vertex_buffer_address & 0xFFFFFFFF;
 				data.vertex_buffer_address[1] = rt_data.vertex_buffer_address >> 32;
+				data.albedo_tex_index = albedo_tex_index;
 				data.albedo[0] = albedo.r;
 				data.albedo[1] = albedo.g;
 				data.albedo[2] = albedo.b;
@@ -4245,6 +4315,10 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				data.emission[1] = emission.g * emission_energy;
 				data.emission[2] = emission.b * emission_energy;
 				data.emission[3] = 1.0;
+				data.uv_scale_offset[0] = uv1_scale.x;
+				data.uv_scale_offset[1] = uv1_scale.y;
+				data.uv_scale_offset[2] = uv1_offset.x;
+				data.uv_scale_offset[3] = uv1_offset.y;
 				instance_data.push_back(data);
 			}
 		}
@@ -4443,11 +4517,26 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 		}
 	}
 
+	last_sky_2d = sky_2d;
+	last_sky_array = sky_array;
+
 	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
 	// The probe atlases are bound as storage images, matching the usage of the
 	// blend passes (sampled-texture usage inside a raytracing list confuses the
 	// graph's layout tracking).
+	// Albedo texture table, padded to its fixed size with a white default.
+	RD::Uniform albedo_table_uniform;
+	albedo_table_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+	albedo_table_uniform.binding = 11;
+	{
+		RID default_white = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+		for (uint32_t t = 0; t < MAX_ALBEDO_TEXTURES; t++) {
+			albedo_table_uniform.append_id(t < albedo_texture_table.size() ? albedo_texture_table[t] : default_white);
+		}
+	}
+	RID material_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED);
+
 	RID trace_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(gi->ddgi_shader.trace_shader, 0,
 			RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, volume_ubo),
@@ -4459,7 +4548,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, probe_data_tex),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 8, linear_sampler),
 			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, sky_2d),
-			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 10, sky_array));
+			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 10, sky_array),
+			albedo_table_uniform,
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 12, material_sampler));
 
 	RD::RaytracingListID raytracing_list = RD::get_singleton()->raytracing_list_begin();
 	RD::get_singleton()->raytracing_list_bind_raytracing_pipeline(raytracing_list, gi->ddgi_shader.trace_pipeline);
@@ -4541,6 +4632,12 @@ void GI::DDGI::free_data() {
 		RD::get_singleton()->free_rid(lights_buffer);
 		lights_buffer = RID();
 	}
+	for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
+		if (reflections_params_ubo[v].is_valid()) {
+			RD::get_singleton()->free_rid(reflections_params_ubo[v]);
+			reflections_params_ubo[v] = RID();
+		}
+	}
 	if (instance_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(instance_buffer);
 		instance_buffer = RID();
@@ -4555,6 +4652,115 @@ void GI::DDGI::free_data() {
 
 GI::DDGI::~DDGI() {
 	free_data();
+}
+
+void GI::process_rt_reflections(Ref<RenderSceneBuffersRD> p_render_buffers, RenderDataRD *p_render_data, const RID *p_normal_roughness_slices) {
+	if (!ddgi_shader.available || ddgi_shader.reflections_pipeline.is_null()) {
+		return;
+	}
+
+	ERR_FAIL_COND(p_render_buffers.is_null());
+	if (!p_render_buffers->has_custom_data(RB_SCOPE_DDGI)) {
+		return;
+	}
+
+	RID environment = p_render_data->environment;
+	if (environment.is_null() || !RendererSceneRenderRD::get_singleton()->environment_get_ddgi_reflections(environment)) {
+		return;
+	}
+
+	Ref<DDGI> ddgi = p_render_buffers->get_custom_data(RB_SCOPE_DDGI);
+	if (ddgi->tlas.is_null() || ddgi->volume_ubo.is_null()) {
+		return;
+	}
+
+	Ref<RenderBuffersGI> rbgi = p_render_buffers->get_custom_data(RB_SCOPE_GI);
+	ERR_FAIL_COND(rbgi.is_null());
+
+	if (!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION)) {
+		return;
+	}
+
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+
+	RD::get_singleton()->draw_command_begin_label("DDGI Reflections");
+
+	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RID sky_2d = ddgi->last_sky_2d.is_valid() ? ddgi->last_sky_2d : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	RID sky_array = ddgi->last_sky_array.is_valid() ? ddgi->last_sky_array : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
+
+	struct ReflectionsPushConstant {
+		uint32_t view_index;
+		uint32_t half_res;
+		uint32_t orthogonal;
+		float max_roughness;
+
+		float ray_bias;
+		float pad[3];
+	};
+
+	Size2i internal_size = p_render_buffers->get_internal_size();
+	uint32_t view_count = p_render_data->scene_data->view_count;
+
+	ReflectionsPushConstant push_constant = {};
+	push_constant.half_res = half_resolution ? 1 : 0;
+	push_constant.orthogonal = p_render_data->scene_data->view_projection[0].is_orthogonal() ? 1 : 0;
+	push_constant.max_roughness = CLAMP(RendererSceneRenderRD::get_singleton()->environment_get_ddgi_reflections_max_roughness(environment), 0.0f, 1.0f);
+	push_constant.ray_bias = 0.05;
+
+	Size2i buffer_size = internal_size;
+	if (half_resolution) {
+		buffer_size.x >>= 1;
+		buffer_size.y >>= 1;
+	}
+
+	// Albedo texture table, padded to its fixed size with a white default.
+	RD::Uniform albedo_table_uniform;
+	albedo_table_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+	albedo_table_uniform.binding = 15;
+	{
+		RID default_white = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+		for (uint32_t t = 0; t < DDGI::MAX_ALBEDO_TEXTURES; t++) {
+			albedo_table_uniform.append_id(t < ddgi->albedo_texture_table.size() ? ddgi->albedo_texture_table[t] : default_white);
+		}
+	}
+	RID material_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED);
+
+	for (uint32_t v = 0; v < view_count; v++) {
+		push_constant.view_index = v;
+		RD::get_singleton()->buffer_update(ddgi->reflections_params_ubo[v], 0, sizeof(ReflectionsPushConstant), &push_constant);
+
+		RID reflection_slice = p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION, v, 0);
+
+		RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(ddgi_shader.reflections_shader, 0,
+				RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, ddgi->tlas),
+				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, ddgi->volume_ubo),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, ddgi->instance_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, ddgi->lights_buffer),
+				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ddgi->irradiance_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, ddgi->distance_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, ddgi->probe_data_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 7, linear_sampler),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 8, sky_2d),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, sky_array),
+				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 10, rbgi->scene_data_ubo),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 11, p_render_buffers->get_depth_texture(v)),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 12, p_normal_roughness_slices[v]),
+				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, reflection_slice),
+				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 14, ddgi->reflections_params_ubo[v]),
+				albedo_table_uniform,
+				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 16, material_sampler));
+
+		RD::RaytracingListID raytracing_list = RD::get_singleton()->raytracing_list_begin();
+		RD::get_singleton()->raytracing_list_bind_raytracing_pipeline(raytracing_list, ddgi_shader.reflections_pipeline);
+		RD::get_singleton()->raytracing_list_bind_uniform_set(raytracing_list, uniform_set, 0);
+		RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, ddgi_shader.reflections_hit_sbt, buffer_size.x, buffer_size.y, 1);
+		RD::get_singleton()->raytracing_list_end();
+	}
+
+	RD::get_singleton()->draw_command_end_label();
 }
 
 void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, const Transform3D &p_transform, const PagedArray<RID> &p_voxel_gi_instances, uint32_t &r_voxel_gi_instances_used) {

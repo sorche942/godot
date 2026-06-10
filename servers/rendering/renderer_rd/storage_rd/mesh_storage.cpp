@@ -418,7 +418,7 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 	}
 
 	if (new_surface.attribute_data.size()) {
-		s->attribute_buffer = RD::get_singleton()->vertex_buffer_create(new_surface.attribute_data.size(), new_surface.attribute_data);
+		s->attribute_buffer = RD::get_singleton()->vertex_buffer_create(new_surface.attribute_data.size(), new_surface.attribute_data, index_creation_bits);
 		s->attribute_buffer_size = new_surface.attribute_data.size();
 	}
 	if (new_surface.skin_data.size()) {
@@ -590,7 +590,7 @@ bool MeshStorage::_mesh_surface_build_rt_data(Mesh::Surface *s) {
 	const bool compressed = s->format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES;
 
 	s->rt_vertex_count = output_vertex_count;
-	s->rt_vertex_buffer = RD::get_singleton()->vertex_buffer_create(output_vertex_count * sizeof(float) * 3, {}, RD::BUFFER_CREATION_AS_STORAGE_BIT | RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	s->rt_vertex_buffer = RD::get_singleton()->vertex_buffer_create(output_vertex_count * sizeof(float) * 8, {}, RD::BUFFER_CREATION_AS_STORAGE_BIT | RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	ERR_FAIL_COND_V(s->rt_vertex_buffer.is_null(), false);
 	s->rt_vertex_buffer_address = RD::get_singleton()->buffer_get_device_address(s->rt_vertex_buffer);
 
@@ -612,6 +612,61 @@ bool MeshStorage::_mesh_surface_build_rt_data(Mesh::Surface *s) {
 	} else {
 		push_constant.vertex_stride_words = 3; // float32 x3.
 	}
+
+	if (s->format & RSE::ARRAY_FORMAT_NORMAL) {
+		// The normal/tangent block follows the position block; the octahedral
+		// normal is the first word of each entry in every layout variant.
+		push_constant.flags |= RTUnrollShader::FLAG_HAS_NORMAL;
+		push_constant.normal_offset_words = (push_constant.vertex_stride_words * 4 * s->vertex_count) / 4;
+		uint32_t normal_tangent_stride = 0;
+		if (compressed) {
+			normal_tangent_stride = 4; // Oct normal only; tangent packed in position W.
+		} else if (s->format & RSE::ARRAY_FORMAT_TANGENT) {
+			normal_tangent_stride = 8; // Oct normal + oct tangent.
+		} else {
+			normal_tangent_stride = 4; // Oct normal only.
+		}
+		push_constant.normal_stride_words = normal_tangent_stride / 4;
+	}
+
+	if ((s->format & RSE::ARRAY_FORMAT_TEX_UV) && s->attribute_buffer.is_valid()) {
+		// Compute the UV's position within the attribute stream (see
+		// _mesh_surface_generate_vertex_format for the canonical layout).
+		uint32_t attribute_stride = 0;
+		if (s->format & RSE::ARRAY_FORMAT_COLOR) {
+			attribute_stride += 4; // R8G8B8A8.
+		}
+		uint32_t uv_offset = attribute_stride;
+		attribute_stride += compressed ? 4 : 8; // unorm16x2 : float32x2.
+		if (s->format & RSE::ARRAY_FORMAT_TEX_UV2) {
+			attribute_stride += compressed ? 4 : 8;
+		}
+		for (int idx = 0; idx < RSE::ARRAY_CUSTOM_COUNT; idx++) {
+			const uint64_t fmt_shift[RSE::ARRAY_CUSTOM_COUNT] = { RSE::ARRAY_FORMAT_CUSTOM0_SHIFT, RSE::ARRAY_FORMAT_CUSTOM1_SHIFT, RSE::ARRAY_FORMAT_CUSTOM2_SHIFT, RSE::ARRAY_FORMAT_CUSTOM3_SHIFT };
+			if (s->format & (uint64_t(RSE::ARRAY_FORMAT_CUSTOM0) << idx)) {
+				uint32_t fmt = (s->format >> fmt_shift[idx]) & RSE::ARRAY_FORMAT_CUSTOM_MASK;
+				const uint32_t fmtsize[RSE::ARRAY_CUSTOM_MAX] = { 4, 4, 4, 8, 4, 8, 12, 16 };
+				attribute_stride += fmtsize[fmt];
+			}
+		}
+
+		uint64_t attribute_buffer_address = RD::get_singleton()->buffer_get_device_address(s->attribute_buffer);
+		if (attribute_buffer_address != 0) {
+			push_constant.flags |= RTUnrollShader::FLAG_HAS_UV;
+			if (compressed) {
+				push_constant.flags |= RTUnrollShader::FLAG_UV_COMPRESSED;
+			}
+			push_constant.attribute_buffer_address[0] = attribute_buffer_address & 0xFFFFFFFF;
+			push_constant.attribute_buffer_address[1] = attribute_buffer_address >> 32;
+			push_constant.attribute_stride_words = attribute_stride / 4;
+			push_constant.uv_offset_words = uv_offset / 4;
+			if (s->uv_scale != Vector4()) {
+				push_constant.uv_scale[0] = s->uv_scale.x;
+				push_constant.uv_scale[1] = s->uv_scale.y;
+			}
+		}
+	}
+
 	push_constant.aabb_position[0] = s->aabb.position.x;
 	push_constant.aabb_position[1] = s->aabb.position.y;
 	push_constant.aabb_position[2] = s->aabb.position.z;
@@ -634,7 +689,7 @@ bool MeshStorage::_mesh_surface_build_rt_data(Mesh::Surface *s) {
 	geometry.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
 	geometry.vertex_buffer = s->rt_vertex_buffer;
 	geometry.vertex_offset = 0;
-	geometry.vertex_stride = sizeof(float) * 3;
+	geometry.vertex_stride = sizeof(float) * 8; // Interleaved [pos.xyz, uv.xy, normal.xyz].
 	geometry.vertex_count = output_vertex_count;
 	geometry.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
 

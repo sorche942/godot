@@ -1370,7 +1370,7 @@ public:
 
 	PASS11(environment_set_sdfgi, RID, bool, int, float, RSE::EnvironmentSDFGIYScale, bool, float, bool, float, float, float)
 
-	PASS11(environment_set_ddgi, RID, bool, const Vector3i &, const Vector3 &, int, float, float, float, bool, bool, float)
+	PASS13(environment_set_ddgi, RID, bool, const Vector3i &, const Vector3 &, int, float, float, float, bool, bool, float, bool, float)
 
 	PASS1RC(bool, environment_get_sdfgi_enabled, RID)
 	PASS1RC(int, environment_get_sdfgi_cascades, RID)

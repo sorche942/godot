@@ -1410,6 +1410,14 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	}
 #endif
 
+	// Required and verified during initialization; shaders rely on non-uniform
+	// indexing of sampled image arrays (e.g. raytraced material fetches).
+	VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing_features = {};
+	descriptor_indexing_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+	descriptor_indexing_features.pNext = create_info_next;
+	descriptor_indexing_features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+	create_info_next = &descriptor_indexing_features;
+
 	VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {};
 	if (acceleration_structure_capabilities.acceleration_structure_support) {
 		acceleration_structure_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;

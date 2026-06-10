@@ -173,6 +173,8 @@ private:
 	bool ddgi_probe_relocation = true;
 	bool ddgi_probe_classification = true;
 	float ddgi_min_frontface_distance = 0.3;
+	bool ddgi_reflections = true;
+	float ddgi_reflections_max_roughness = 0.6;
 	void _update_ddgi();
 
 	// Glow
@@ -383,6 +385,10 @@ public:
 	bool is_ddgi_using_probe_classification() const;
 	void set_ddgi_min_frontface_distance(float p_distance);
 	float get_ddgi_min_frontface_distance() const;
+	void set_ddgi_reflections(bool p_enabled);
+	bool is_ddgi_using_reflections() const;
+	void set_ddgi_reflections_max_roughness(float p_roughness);
+	float get_ddgi_reflections_max_roughness() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

@@ -338,10 +338,18 @@ private:
 	struct RTUnrollShader {
 		struct PushConstant {
 			uint32_t index_buffer_address[2];
+			uint32_t attribute_buffer_address[2];
+
 			uint32_t output_vertex_count;
 			uint32_t vertex_stride_words;
+			uint32_t attribute_stride_words;
+			uint32_t uv_offset_words;
 
 			uint32_t flags;
+			uint32_t normal_offset_words;
+			float uv_scale[2];
+
+			uint32_t normal_stride_words;
 			uint32_t pad[3];
 
 			float aabb_position[4];
@@ -352,6 +360,9 @@ private:
 			FLAG_INDEXED = (1 << 0),
 			FLAG_INDEX_16 = (1 << 1),
 			FLAG_COMPRESSED = (1 << 2),
+			FLAG_HAS_UV = (1 << 3),
+			FLAG_UV_COMPRESSED = (1 << 4),
+			FLAG_HAS_NORMAL = (1 << 5),
 		};
 
 		RtTriangleUnrollShaderRD shader;
@@ -408,7 +419,7 @@ public:
 
 	struct MeshSurfaceRTData {
 		RID blas;
-		uint64_t vertex_buffer_address = 0;
+		uint64_t vertex_buffer_address = 0; // Stream of [position.xyz, uv.xy, normal.xyz] floats, 32 bytes per vertex.
 		uint32_t vertex_count = 0; // Non-indexed triangle list, 3 vertices per triangle.
 	};
 

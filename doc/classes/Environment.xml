@@ -110,6 +110,12 @@
 		<member name="ddgi_rays_per_probe" type="int" setter="set_ddgi_rays_per_probe" getter="get_ddgi_rays_per_probe" default="144" experimental="">
 			The number of rays each probe traces every frame. Higher values converge faster and produce more stable lighting, at a performance cost.
 		</member>
+		<member name="ddgi_reflections" type="bool" setter="set_ddgi_reflections" getter="is_ddgi_using_reflections" default="true" experimental="">
+			If [code]true[/code], smooth surfaces receive raytraced reflections: one reflection ray is traced per pixel against the scene, shaded with direct light and the DDGI probes (so reflections include global illumination). Rougher surfaces fall back to the probe based glossy approximation.
+		</member>
+		<member name="ddgi_reflections_max_roughness" type="float" setter="set_ddgi_reflections_max_roughness" getter="get_ddgi_reflections_max_roughness" default="0.6" experimental="">
+			Surfaces with roughness above this value use the probe based glossy fallback instead of raytraced reflections. The transition is blended for seamless results.
+		</member>
 		<member name="ddgi_view_bias" type="float" setter="set_ddgi_view_bias" getter="get_ddgi_view_bias" default="0.4" experimental="">
 			The world-space offset towards the camera applied to shaded points when sampling the probes. Increase to reduce self-shadowing artifacts, decrease to reduce light leaking through thin geometry.
 		</member>

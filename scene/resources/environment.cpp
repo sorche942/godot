@@ -695,6 +695,24 @@ float Environment::get_ddgi_min_frontface_distance() const {
 	return ddgi_min_frontface_distance;
 }
 
+void Environment::set_ddgi_reflections(bool p_enabled) {
+	ddgi_reflections = p_enabled;
+	_update_ddgi();
+}
+
+bool Environment::is_ddgi_using_reflections() const {
+	return ddgi_reflections;
+}
+
+void Environment::set_ddgi_reflections_max_roughness(float p_roughness) {
+	ddgi_reflections_max_roughness = CLAMP(p_roughness, 0.0f, 1.0f);
+	_update_ddgi();
+}
+
+float Environment::get_ddgi_reflections_max_roughness() const {
+	return ddgi_reflections_max_roughness;
+}
+
 void Environment::_update_ddgi() {
 	RS::get_singleton()->environment_set_ddgi(
 			environment,
@@ -707,7 +725,9 @@ void Environment::_update_ddgi() {
 			ddgi_view_bias,
 			ddgi_probe_relocation,
 			ddgi_probe_classification,
-			ddgi_min_frontface_distance);
+			ddgi_min_frontface_distance,
+			ddgi_reflections,
+			ddgi_reflections_max_roughness);
 }
 
 // Glow
@@ -1559,6 +1579,10 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_ddgi_using_probe_classification"), &Environment::is_ddgi_using_probe_classification);
 	ClassDB::bind_method(D_METHOD("set_ddgi_min_frontface_distance", "distance"), &Environment::set_ddgi_min_frontface_distance);
 	ClassDB::bind_method(D_METHOD("get_ddgi_min_frontface_distance"), &Environment::get_ddgi_min_frontface_distance);
+	ClassDB::bind_method(D_METHOD("set_ddgi_reflections", "enabled"), &Environment::set_ddgi_reflections);
+	ClassDB::bind_method(D_METHOD("is_ddgi_using_reflections"), &Environment::is_ddgi_using_reflections);
+	ClassDB::bind_method(D_METHOD("set_ddgi_reflections_max_roughness", "roughness"), &Environment::set_ddgi_reflections_max_roughness);
+	ClassDB::bind_method(D_METHOD("get_ddgi_reflections_max_roughness"), &Environment::get_ddgi_reflections_max_roughness);
 
 	ADD_GROUP("DDGI", "ddgi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_ddgi_enabled", "is_ddgi_enabled");
@@ -1571,6 +1595,8 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_probe_relocation"), "set_ddgi_probe_relocation", "is_ddgi_using_probe_relocation");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_probe_classification"), "set_ddgi_probe_classification", "is_ddgi_using_probe_classification");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_min_frontface_distance", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_ddgi_min_frontface_distance", "get_ddgi_min_frontface_distance");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_reflections"), "set_ddgi_reflections", "is_ddgi_using_reflections");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_reflections_max_roughness", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_ddgi_reflections_max_roughness", "get_ddgi_reflections_max_roughness");
 
 	// Glow
 

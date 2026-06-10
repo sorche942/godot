@@ -707,8 +707,8 @@ RSE::EnvironmentSDFGIYScale RendererSceneRender::environment_get_sdfgi_y_scale(R
 
 // DDGI
 
-void RendererSceneRender::environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance) {
-	environment_storage.environment_set_ddgi(p_env, p_enable, p_probe_counts, p_probe_spacing, p_rays_per_probe, p_energy, p_normal_bias, p_view_bias, p_probe_relocation, p_probe_classification, p_min_frontface_distance);
+void RendererSceneRender::environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance, bool p_reflections, float p_reflections_max_roughness) {
+	environment_storage.environment_set_ddgi(p_env, p_enable, p_probe_counts, p_probe_spacing, p_rays_per_probe, p_energy, p_normal_bias, p_view_bias, p_probe_relocation, p_probe_classification, p_min_frontface_distance, p_reflections, p_reflections_max_roughness);
 }
 
 bool RendererSceneRender::environment_get_ddgi_enabled(RID p_env) const {
@@ -749,6 +749,14 @@ bool RendererSceneRender::environment_get_ddgi_probe_classification(RID p_env) c
 
 float RendererSceneRender::environment_get_ddgi_min_frontface_distance(RID p_env) const {
 	return environment_storage.environment_get_ddgi_min_frontface_distance(p_env);
+}
+
+bool RendererSceneRender::environment_get_ddgi_reflections(RID p_env) const {
+	return environment_storage.environment_get_ddgi_reflections(p_env);
+}
+
+float RendererSceneRender::environment_get_ddgi_reflections_max_roughness(RID p_env) const {
+	return environment_storage.environment_get_ddgi_reflections_max_roughness(p_env);
 }
 
 // Adjustments

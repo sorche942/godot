@@ -890,7 +890,7 @@ float RendererEnvironmentStorage::environment_get_sdfgi_probe_bias(RID p_env) co
 
 // DDGI
 
-void RendererEnvironmentStorage::environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance) {
+void RendererEnvironmentStorage::environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance, bool p_reflections, float p_reflections_max_roughness) {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL(env);
 #ifdef DEBUG_ENABLED
@@ -908,6 +908,8 @@ void RendererEnvironmentStorage::environment_set_ddgi(RID p_env, bool p_enable, 
 	env->ddgi_probe_relocation = p_probe_relocation;
 	env->ddgi_probe_classification = p_probe_classification;
 	env->ddgi_min_frontface_distance = p_min_frontface_distance;
+	env->ddgi_reflections = p_reflections;
+	env->ddgi_reflections_max_roughness = p_reflections_max_roughness;
 }
 
 bool RendererEnvironmentStorage::environment_get_ddgi_enabled(RID p_env) const {
@@ -968,6 +970,18 @@ float RendererEnvironmentStorage::environment_get_ddgi_min_frontface_distance(RI
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL_V(env, 0.3);
 	return env->ddgi_min_frontface_distance;
+}
+
+bool RendererEnvironmentStorage::environment_get_ddgi_reflections(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, true);
+	return env->ddgi_reflections;
+}
+
+float RendererEnvironmentStorage::environment_get_ddgi_reflections_max_roughness(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.6);
+	return env->ddgi_reflections_max_roughness;
 }
 
 RSE::EnvironmentSDFGIYScale RendererEnvironmentStorage::environment_get_sdfgi_y_scale(RID p_env) const {

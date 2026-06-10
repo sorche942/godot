@@ -1366,6 +1366,8 @@
 			<param index="8" name="probe_relocation" type="bool" />
 			<param index="9" name="probe_classification" type="bool" />
 			<param index="10" name="min_frontface_distance" type="float" />
+			<param index="11" name="reflections" type="bool" />
+			<param index="12" name="reflections_max_roughness" type="float" />
 			<description>
 				Configures DDGI (raytraced dynamic diffuse global illumination) for the specified environment RID. See [code]ddgi_*[/code] properties in [Environment] for more information.
 			</description>
