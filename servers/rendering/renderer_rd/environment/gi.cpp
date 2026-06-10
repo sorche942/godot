@@ -3986,12 +3986,6 @@ Ref<GI::DDGI> GI::create_ddgi(RID p_env, const Vector3 &p_world_position) {
 void GI::DDGI::create(RID p_env, const Vector3 &p_world_position, GI *p_gi) {
 	gi = p_gi;
 
-	volume_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(VolumeDataUBO));
-	lights_buffer = RD::get_singleton()->storage_buffer_create(sizeof(Light) * MAX_LIGHTS);
-	for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
-		reflections_params_ubo[v] = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 8);
-	}
-
 	update_settings(p_env);
 
 	// Snap the volume to the camera without marking everything as scrolled.
@@ -4002,6 +3996,20 @@ void GI::DDGI::create(RID p_env, const Vector3 &p_world_position, GI *p_gi) {
 
 bool GI::DDGI::update_settings(RID p_env) {
 	RendererSceneRenderRD *scene_render = RendererSceneRenderRD::get_singleton();
+
+	// The render buffers free all custom data when they are reconfigured (e.g.
+	// on viewport resize), without destroying the objects; recreate our
+	// per-volume buffers when that happened. The texture checks below handle
+	// the textures the same way.
+	bool buffers_created = false;
+	if (volume_ubo.is_null()) {
+		volume_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(VolumeDataUBO));
+		lights_buffer = RD::get_singleton()->storage_buffer_create(sizeof(Light) * MAX_LIGHTS);
+		for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
+			reflections_params_ubo[v] = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 8);
+		}
+		buffers_created = true;
+	}
 
 	Vector3i new_probe_counts = scene_render->environment_get_ddgi_probe_counts(p_env);
 	new_probe_counts = new_probe_counts.clampi(2, 64);
@@ -4021,7 +4029,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		new_rays_per_probe = NUM_FIXED_RAYS * 2;
 	}
 
-	if (irradiance_tex.is_valid() && new_probe_counts == probe_counts && new_probe_spacing == probe_spacing && new_rays_per_probe == rays_per_probe && new_relocation == use_probe_relocation && new_classification == use_probe_classification) {
+	if (!buffers_created && irradiance_tex.is_valid() && new_probe_counts == probe_counts && new_probe_spacing == probe_spacing && new_rays_per_probe == rays_per_probe && new_relocation == use_probe_relocation && new_classification == use_probe_classification) {
 		return false;
 	}
 
