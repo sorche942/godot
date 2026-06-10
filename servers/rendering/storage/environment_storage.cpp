@@ -888,6 +888,88 @@ float RendererEnvironmentStorage::environment_get_sdfgi_probe_bias(RID p_env) co
 	return env->sdfgi_probe_bias;
 }
 
+// DDGI
+
+void RendererEnvironmentStorage::environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+#ifdef DEBUG_ENABLED
+	if (OS::get_singleton()->get_current_rendering_method() != "forward_plus" && p_enable) {
+		WARN_PRINT_ONCE_ED("DDGI is only available when using the Forward+ renderer.");
+	}
+#endif
+	env->ddgi_enabled = p_enable;
+	env->ddgi_probe_counts = p_probe_counts;
+	env->ddgi_probe_spacing = p_probe_spacing;
+	env->ddgi_rays_per_probe = p_rays_per_probe;
+	env->ddgi_energy = p_energy;
+	env->ddgi_normal_bias = p_normal_bias;
+	env->ddgi_view_bias = p_view_bias;
+	env->ddgi_probe_relocation = p_probe_relocation;
+	env->ddgi_probe_classification = p_probe_classification;
+	env->ddgi_min_frontface_distance = p_min_frontface_distance;
+}
+
+bool RendererEnvironmentStorage::environment_get_ddgi_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->ddgi_enabled;
+}
+
+Vector3i RendererEnvironmentStorage::environment_get_ddgi_probe_counts(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, Vector3i(16, 8, 16));
+	return env->ddgi_probe_counts;
+}
+
+Vector3 RendererEnvironmentStorage::environment_get_ddgi_probe_spacing(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, Vector3(2.0, 2.0, 2.0));
+	return env->ddgi_probe_spacing;
+}
+
+int RendererEnvironmentStorage::environment_get_ddgi_rays_per_probe(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 144);
+	return env->ddgi_rays_per_probe;
+}
+
+float RendererEnvironmentStorage::environment_get_ddgi_energy(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1.0);
+	return env->ddgi_energy;
+}
+
+float RendererEnvironmentStorage::environment_get_ddgi_normal_bias(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.2);
+	return env->ddgi_normal_bias;
+}
+
+float RendererEnvironmentStorage::environment_get_ddgi_view_bias(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.4);
+	return env->ddgi_view_bias;
+}
+
+bool RendererEnvironmentStorage::environment_get_ddgi_probe_relocation(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, true);
+	return env->ddgi_probe_relocation;
+}
+
+bool RendererEnvironmentStorage::environment_get_ddgi_probe_classification(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, true);
+	return env->ddgi_probe_classification;
+}
+
+float RendererEnvironmentStorage::environment_get_ddgi_min_frontface_distance(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.3);
+	return env->ddgi_min_frontface_distance;
+}
+
 RSE::EnvironmentSDFGIYScale RendererEnvironmentStorage::environment_get_sdfgi_y_scale(RID p_env) const {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL_V(env, RSE::ENV_SDFGI_Y_SCALE_75_PERCENT);

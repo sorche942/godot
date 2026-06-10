@@ -172,6 +172,18 @@ private:
 		float sdfgi_probe_bias = 1.1;
 		RSE::EnvironmentSDFGIYScale sdfgi_y_scale = RSE::ENV_SDFGI_Y_SCALE_75_PERCENT;
 
+		// DDGI
+		bool ddgi_enabled = false;
+		Vector3i ddgi_probe_counts = Vector3i(16, 8, 16);
+		Vector3 ddgi_probe_spacing = Vector3(2.0, 2.0, 2.0);
+		int ddgi_rays_per_probe = 144;
+		float ddgi_energy = 1.0;
+		float ddgi_normal_bias = 0.2;
+		float ddgi_view_bias = 0.4;
+		bool ddgi_probe_relocation = true;
+		bool ddgi_probe_classification = true;
+		float ddgi_min_frontface_distance = 0.3;
+
 		// Adjustments
 		bool adjustments_enabled = false;
 		float adjustments_brightness = 1.0f;
@@ -323,6 +335,19 @@ public:
 	float environment_get_sdfgi_normal_bias(RID p_env) const;
 	float environment_get_sdfgi_probe_bias(RID p_env) const;
 	RSE::EnvironmentSDFGIYScale environment_get_sdfgi_y_scale(RID p_env) const;
+
+	// DDGI
+	void environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance);
+	bool environment_get_ddgi_enabled(RID p_env) const;
+	Vector3i environment_get_ddgi_probe_counts(RID p_env) const;
+	Vector3 environment_get_ddgi_probe_spacing(RID p_env) const;
+	int environment_get_ddgi_rays_per_probe(RID p_env) const;
+	float environment_get_ddgi_energy(RID p_env) const;
+	float environment_get_ddgi_normal_bias(RID p_env) const;
+	float environment_get_ddgi_view_bias(RID p_env) const;
+	bool environment_get_ddgi_probe_relocation(RID p_env) const;
+	bool environment_get_ddgi_probe_classification(RID p_env) const;
+	float environment_get_ddgi_min_frontface_distance(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

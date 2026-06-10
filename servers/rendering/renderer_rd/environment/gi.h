@@ -36,6 +36,9 @@
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/pipeline_deferred_rd.h"
+#include "servers/rendering/renderer_rd/shaders/environment/ddgi.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/ddgi_blend.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/ddgi_probe_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/gi.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_debug.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_debug_probes.glsl.gen.h"
@@ -51,6 +54,7 @@
 
 #define RB_SCOPE_GI SNAME("rbgi")
 #define RB_SCOPE_SDFGI SNAME("sdfgi")
+#define RB_SCOPE_DDGI SNAME("ddgi")
 
 #define RB_TEX_AMBIENT SNAME("ambient")
 #define RB_TEX_REFLECTION SNAME("reflection")
@@ -440,6 +444,40 @@ private:
 
 	} sdfgi_shader;
 
+	/* DDGI */
+
+	struct DDGIShader {
+		bool available = false;
+
+		DdgiShaderRD trace;
+		RID trace_version;
+		RID trace_shader;
+		RID trace_pipeline;
+		RID hit_sbt;
+		RD::HitShaderBindingTableRange hit_sbt_range = 0;
+
+		enum BlendMode {
+			BLEND_MODE_IRRADIANCE,
+			BLEND_MODE_DISTANCE,
+			BLEND_MODE_MAX
+		};
+
+		DdgiBlendShaderRD blend;
+		RID blend_version;
+		RID blend_pipelines[BLEND_MODE_MAX];
+
+		enum ProbeUpdateMode {
+			PROBE_UPDATE_MODE_RELOCATE,
+			PROBE_UPDATE_MODE_CLASSIFY,
+			PROBE_UPDATE_MODE_RESET,
+			PROBE_UPDATE_MODE_MAX
+		};
+
+		DdgiProbeUpdateShaderRD probe_update;
+		RID probe_update_version;
+		RID probe_update_pipelines[PROBE_UPDATE_MODE_MAX];
+	} ddgi_shader;
+
 public:
 	static GI *get_singleton() { return singleton; }
 
@@ -467,6 +505,7 @@ public:
 		bool using_half_size_gi = false;
 
 		RID uniform_set[RendererSceneRender::MAX_RENDER_VIEWS];
+		uint32_t uniform_set_mode = 0xFFFFFFFF; // Shader variant the uniform sets were created against.
 		RID scene_data_ubo;
 
 		RID get_voxel_gi_buffer();
@@ -705,6 +744,155 @@ public:
 		void render_static_lights(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, uint32_t p_cascade_count, const uint32_t *p_cascade_indices, const PagedArray<RID> *p_positional_light_cull_result);
 	};
 
+	/* DDGI */
+
+	// RTXGI-style Dynamic Diffuse Global Illumination: a camera-centered,
+	// infinitely scrolling grid of irradiance probes updated each frame with
+	// hardware raytracing.
+	class DDGI : public RenderBufferCustomDataRD {
+		GDCLASS(DDGI, RenderBufferCustomDataRD)
+
+	public:
+		enum {
+			IRRADIANCE_OCT_SIZE = 6, // Texels per probe (interior).
+			DISTANCE_OCT_SIZE = 14,
+			NUM_FIXED_RAYS = 32,
+			MAX_LIGHTS = 32,
+		};
+
+		enum {
+			FLAG_PROBE_RELOCATION = (1 << 0),
+			FLAG_PROBE_CLASSIFICATION = (1 << 1),
+		};
+
+		enum {
+			SKY_MODE_COLOR = 0,
+			SKY_MODE_SKY_2D = 1,
+			SKY_MODE_SKY_ARRAY = 2,
+		};
+
+		// Mirrors the DDGIVolumeData struct in ddgi_inc.glsl (std140).
+		struct VolumeDataUBO {
+			float probe_spacing[3];
+			float probe_max_ray_distance;
+
+			int32_t probe_counts[3];
+			int32_t probe_ray_count;
+
+			int32_t probe_scroll_offsets[3];
+			int32_t light_count;
+
+			int32_t scroll_delta[3];
+			uint32_t flags;
+
+			float origin[3];
+			float probe_hysteresis;
+
+			float probe_ray_rotation[4];
+
+			float probe_normal_bias;
+			float probe_view_bias;
+			float probe_distance_exponent;
+			float probe_min_frontface_distance;
+
+			float energy;
+			float irradiance_gamma;
+			float random_backface_threshold;
+			float fixed_backface_threshold;
+
+			float irradiance_threshold;
+			float brightness_threshold;
+			float sky_energy;
+			uint32_t sky_mode;
+
+			float sky_color[3];
+			float exposure_normalization;
+		};
+
+		// Mirrors InstanceData in ddgi.glsl (std430).
+		struct InstanceDataSSBO {
+			float xform[12]; // 3 rows of vec4.
+			uint32_t vertex_buffer_address[2];
+			uint32_t pad[2];
+			float albedo[4];
+			float emission[4];
+		};
+
+		// Mirrors DDGILight in ddgi.glsl (std430).
+		struct Light {
+			float color[3];
+			float energy;
+
+			float direction[3];
+			uint32_t has_shadow;
+
+			float position[3];
+			float attenuation;
+
+			uint32_t type;
+			float cos_spot_angle;
+			float inv_spot_attenuation;
+			float radius;
+		};
+
+		GI *gi = nullptr;
+
+		// Configuration (from the environment).
+		Vector3i probe_counts = Vector3i(16, 8, 16);
+		Vector3 probe_spacing = Vector3(2.0, 2.0, 2.0);
+		int rays_per_probe = 144;
+		float energy = 1.0;
+		float normal_bias = 0.2;
+		float view_bias = 0.4;
+		bool use_probe_relocation = true;
+		bool use_probe_classification = true;
+		float min_frontface_distance = 0.3;
+
+		// Scrolling state.
+		Vector3i scroll_offsets;
+		Vector3i scroll_delta;
+		bool needs_reset = true;
+		uint32_t frame = 0;
+
+		RID ray_data_tex;
+		RID irradiance_tex;
+		RID distance_tex;
+		RID probe_data_tex;
+
+		RID volume_ubo;
+		RID lights_buffer;
+		RID instance_buffer;
+		uint32_t instance_buffer_capacity = 0;
+		RID tlas;
+		uint32_t tlas_capacity = 0;
+
+		// Per-frame culled scene data, set by the renderer before render_scene.
+		const PagedArray<RenderGeometryInstance *> *pending_geometry_instances = nullptr;
+		const PagedArray<RID> *pending_lights = nullptr;
+		const Vector<RID> *pending_directional_lights = nullptr;
+
+		LocalVector<RD::AccelerationStructureInstance> tlas_instances;
+		LocalVector<InstanceDataSSBO> instance_data;
+
+		void create(RID p_env, const Vector3 &p_world_position, GI *p_gi);
+		// Returns true when settings changed in a way that requires a probe reset.
+		bool update_settings(RID p_env);
+		void update_scroll(const Vector3 &p_world_position);
+		AABB get_bounds() const;
+
+		// Builds the TLAS and runs the trace/blend/relocation/classification passes.
+		void update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky);
+
+		uint32_t get_probe_count() const { return uint32_t(probe_counts.x * probe_counts.y * probe_counts.z); }
+		uint32_t get_probes_per_plane() const { return uint32_t(probe_counts.x * probe_counts.z); }
+
+		void fill_volume_ubo(VolumeDataUBO &r_ubo) const;
+
+		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {}
+		virtual void free_data() override;
+		~DDGI();
+	};
+
 	RSE::EnvironmentSDFGIRayCount sdfgi_ray_count = RSE::ENV_SDFGI_RAY_COUNT_16;
 	RSE::EnvironmentSDFGIFramesToConverge sdfgi_frames_to_converge = RSE::ENV_SDFGI_CONVERGE_IN_30_FRAMES;
 	RSE::EnvironmentSDFGIFramesToUpdateLight sdfgi_frames_to_update_light = RSE::ENV_SDFGI_UPDATE_LIGHT_IN_4_FRAMES;
@@ -810,6 +998,9 @@ public:
 		MODE_SDFGI,
 		MODE_COMBINED,
 		MODE_COMBINED_WITHOUT_SAMPLER,
+		MODE_DDGI,
+		MODE_DDGI_COMBINED,
+		MODE_DDGI_COMBINED_WITHOUT_SAMPLER,
 		MODE_MAX
 	};
 
@@ -821,11 +1012,16 @@ public:
 	};
 
 	RID default_voxel_gi_buffer;
+	RID default_ddgi_ubo;
+	RID default_ddgi_rgba16f_tex;
+	RID default_ddgi_rg16f_tex;
 
 	bool half_resolution = false;
 	GiShaderRD shader;
 	RID shader_version;
 	PipelineDeferredRD pipelines[SHADER_SPECIALIZATION_VARIATIONS][MODE_MAX];
+
+	RendererRD::SkyRD *sky_rd = nullptr;
 
 	GI();
 	~GI();
@@ -834,6 +1030,9 @@ public:
 	void free();
 
 	Ref<SDFGI> create_sdfgi(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size);
+
+	bool is_ddgi_supported() const { return ddgi_shader.available; }
+	Ref<DDGI> create_ddgi(RID p_env, const Vector3 &p_world_position);
 
 	void setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, const Transform3D &p_transform, const PagedArray<RID> &p_voxel_gi_instances, uint32_t &r_voxel_gi_instances_used);
 	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances);

@@ -603,6 +603,113 @@ void Environment::_update_sdfgi() {
 			sdfgi_probe_bias);
 }
 
+// DDGI
+
+void Environment::set_ddgi_enabled(bool p_enabled) {
+	ddgi_enabled = p_enabled;
+	_update_ddgi();
+}
+
+bool Environment::is_ddgi_enabled() const {
+	return ddgi_enabled;
+}
+
+void Environment::set_ddgi_probe_counts(const Vector3i &p_counts) {
+	ddgi_probe_counts = p_counts.clampi(2, 64);
+	_update_ddgi();
+}
+
+Vector3i Environment::get_ddgi_probe_counts() const {
+	return ddgi_probe_counts;
+}
+
+void Environment::set_ddgi_probe_spacing(const Vector3 &p_spacing) {
+	ddgi_probe_spacing = p_spacing.clampf(0.1, 1000.0);
+	_update_ddgi();
+}
+
+Vector3 Environment::get_ddgi_probe_spacing() const {
+	return ddgi_probe_spacing;
+}
+
+void Environment::set_ddgi_rays_per_probe(int p_rays) {
+	ddgi_rays_per_probe = CLAMP(p_rays, 32, 512);
+	_update_ddgi();
+}
+
+int Environment::get_ddgi_rays_per_probe() const {
+	return ddgi_rays_per_probe;
+}
+
+void Environment::set_ddgi_energy(float p_energy) {
+	ddgi_energy = p_energy;
+	_update_ddgi();
+}
+
+float Environment::get_ddgi_energy() const {
+	return ddgi_energy;
+}
+
+void Environment::set_ddgi_normal_bias(float p_bias) {
+	ddgi_normal_bias = p_bias;
+	_update_ddgi();
+}
+
+float Environment::get_ddgi_normal_bias() const {
+	return ddgi_normal_bias;
+}
+
+void Environment::set_ddgi_view_bias(float p_bias) {
+	ddgi_view_bias = p_bias;
+	_update_ddgi();
+}
+
+float Environment::get_ddgi_view_bias() const {
+	return ddgi_view_bias;
+}
+
+void Environment::set_ddgi_probe_relocation(bool p_enabled) {
+	ddgi_probe_relocation = p_enabled;
+	_update_ddgi();
+}
+
+bool Environment::is_ddgi_using_probe_relocation() const {
+	return ddgi_probe_relocation;
+}
+
+void Environment::set_ddgi_probe_classification(bool p_enabled) {
+	ddgi_probe_classification = p_enabled;
+	_update_ddgi();
+}
+
+bool Environment::is_ddgi_using_probe_classification() const {
+	return ddgi_probe_classification;
+}
+
+void Environment::set_ddgi_min_frontface_distance(float p_distance) {
+	ddgi_min_frontface_distance = p_distance;
+	_update_ddgi();
+}
+
+float Environment::get_ddgi_min_frontface_distance() const {
+	return ddgi_min_frontface_distance;
+}
+
+void Environment::_update_ddgi() {
+	RS::get_singleton()->environment_set_ddgi(
+			environment,
+			ddgi_enabled,
+			ddgi_probe_counts,
+			ddgi_probe_spacing,
+			ddgi_rays_per_probe,
+			ddgi_energy,
+			ddgi_normal_bias,
+			ddgi_view_bias,
+			ddgi_probe_relocation,
+			ddgi_probe_classification,
+			ddgi_min_frontface_distance);
+}
+
 // Glow
 
 void Environment::set_glow_enabled(bool p_enabled) {
@@ -1429,6 +1536,41 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_energy"), "set_sdfgi_energy", "get_sdfgi_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_normal_bias"), "set_sdfgi_normal_bias", "get_sdfgi_normal_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_probe_bias"), "set_sdfgi_probe_bias", "get_sdfgi_probe_bias");
+
+	// DDGI
+
+	ClassDB::bind_method(D_METHOD("set_ddgi_enabled", "enabled"), &Environment::set_ddgi_enabled);
+	ClassDB::bind_method(D_METHOD("is_ddgi_enabled"), &Environment::is_ddgi_enabled);
+	ClassDB::bind_method(D_METHOD("set_ddgi_probe_counts", "counts"), &Environment::set_ddgi_probe_counts);
+	ClassDB::bind_method(D_METHOD("get_ddgi_probe_counts"), &Environment::get_ddgi_probe_counts);
+	ClassDB::bind_method(D_METHOD("set_ddgi_probe_spacing", "spacing"), &Environment::set_ddgi_probe_spacing);
+	ClassDB::bind_method(D_METHOD("get_ddgi_probe_spacing"), &Environment::get_ddgi_probe_spacing);
+	ClassDB::bind_method(D_METHOD("set_ddgi_rays_per_probe", "rays"), &Environment::set_ddgi_rays_per_probe);
+	ClassDB::bind_method(D_METHOD("get_ddgi_rays_per_probe"), &Environment::get_ddgi_rays_per_probe);
+	ClassDB::bind_method(D_METHOD("set_ddgi_energy", "amount"), &Environment::set_ddgi_energy);
+	ClassDB::bind_method(D_METHOD("get_ddgi_energy"), &Environment::get_ddgi_energy);
+	ClassDB::bind_method(D_METHOD("set_ddgi_normal_bias", "bias"), &Environment::set_ddgi_normal_bias);
+	ClassDB::bind_method(D_METHOD("get_ddgi_normal_bias"), &Environment::get_ddgi_normal_bias);
+	ClassDB::bind_method(D_METHOD("set_ddgi_view_bias", "bias"), &Environment::set_ddgi_view_bias);
+	ClassDB::bind_method(D_METHOD("get_ddgi_view_bias"), &Environment::get_ddgi_view_bias);
+	ClassDB::bind_method(D_METHOD("set_ddgi_probe_relocation", "enabled"), &Environment::set_ddgi_probe_relocation);
+	ClassDB::bind_method(D_METHOD("is_ddgi_using_probe_relocation"), &Environment::is_ddgi_using_probe_relocation);
+	ClassDB::bind_method(D_METHOD("set_ddgi_probe_classification", "enabled"), &Environment::set_ddgi_probe_classification);
+	ClassDB::bind_method(D_METHOD("is_ddgi_using_probe_classification"), &Environment::is_ddgi_using_probe_classification);
+	ClassDB::bind_method(D_METHOD("set_ddgi_min_frontface_distance", "distance"), &Environment::set_ddgi_min_frontface_distance);
+	ClassDB::bind_method(D_METHOD("get_ddgi_min_frontface_distance"), &Environment::get_ddgi_min_frontface_distance);
+
+	ADD_GROUP("DDGI", "ddgi_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_ddgi_enabled", "is_ddgi_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3I, "ddgi_probe_counts"), "set_ddgi_probe_counts", "get_ddgi_probe_counts");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "ddgi_probe_spacing"), "set_ddgi_probe_spacing", "get_ddgi_probe_spacing");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "ddgi_rays_per_probe", PROPERTY_HINT_RANGE, "32,512,1"), "set_ddgi_rays_per_probe", "get_ddgi_rays_per_probe");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_energy", PROPERTY_HINT_RANGE, "0,16,0.01"), "set_ddgi_energy", "get_ddgi_energy");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_normal_bias", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_ddgi_normal_bias", "get_ddgi_normal_bias");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_view_bias", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_ddgi_view_bias", "get_ddgi_view_bias");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_probe_relocation"), "set_ddgi_probe_relocation", "is_ddgi_using_probe_relocation");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_probe_classification"), "set_ddgi_probe_classification", "is_ddgi_using_probe_classification");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_min_frontface_distance", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_ddgi_min_frontface_distance", "get_ddgi_min_frontface_distance");
 
 	// Glow
 

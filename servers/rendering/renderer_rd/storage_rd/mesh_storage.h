@@ -34,6 +34,7 @@
 #include "core/templates/rid_owner.h"
 #include "core/templates/self_list.h"
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/shaders/rt_triangle_unroll.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/skeleton.glsl.gen.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/mesh_storage.h"
@@ -138,6 +139,14 @@ private:
 
 			RID blend_shape_buffer;
 			uint32_t blend_shape_buffer_size = 0;
+
+			// Raytracing data, built on demand (e.g. by DDGI). A flat, non-indexed
+			// float32x3 triangle position stream and the BLAS built from it.
+			RID rt_vertex_buffer;
+			uint64_t rt_vertex_buffer_address = 0;
+			uint32_t rt_vertex_count = 0;
+			RID rt_blas;
+			bool rt_build_failed = false;
 
 			RID material;
 
@@ -324,6 +333,37 @@ private:
 		RID default_skeleton_uniform_set;
 	} skeleton_shader;
 
+	/* RT triangle unroll (BLAS input building) */
+
+	struct RTUnrollShader {
+		struct PushConstant {
+			uint32_t index_buffer_address[2];
+			uint32_t output_vertex_count;
+			uint32_t vertex_stride_words;
+
+			uint32_t flags;
+			uint32_t pad[3];
+
+			float aabb_position[4];
+			float aabb_size[4];
+		};
+
+		enum {
+			FLAG_INDEXED = (1 << 0),
+			FLAG_INDEX_16 = (1 << 1),
+			FLAG_COMPRESSED = (1 << 2),
+		};
+
+		RtTriangleUnrollShaderRD shader;
+		RID version;
+		RID version_shader;
+		RID pipeline;
+	} rt_unroll_shader;
+
+	bool rt_acceleration_structures_supported = false;
+
+	bool _mesh_surface_build_rt_data(Mesh::Surface *s);
+
 	struct Skeleton {
 		bool use_2d = false;
 		int size = 0;
@@ -363,6 +403,19 @@ public:
 	bool free(RID p_rid);
 
 	RID get_default_rd_storage_buffer() const { return default_rd_storage_buffer; }
+
+	/* RAYTRACING API */
+
+	struct MeshSurfaceRTData {
+		RID blas;
+		uint64_t vertex_buffer_address = 0;
+		uint32_t vertex_count = 0; // Non-indexed triangle list, 3 vertices per triangle.
+	};
+
+	bool is_rt_supported() const { return rt_acceleration_structures_supported; }
+	// Returns (building lazily) the raytracing data of a mesh surface. Returns false for
+	// surfaces that cannot be raytraced (non-triangles, 2D meshes).
+	bool mesh_surface_get_rt_data(void *p_surface, MeshSurfaceRTData &r_rt_data);
 
 	/* MESH API */
 

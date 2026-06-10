@@ -3284,6 +3284,22 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 			}
 		}
 
+		if (cull_data.cull->ddgi.active && cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->ddgi.bounds)) {
+			uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
+
+			if (base_type == RSE::INSTANCE_LIGHT) {
+				InstanceLightData *instance_light = (InstanceLightData *)idata.instance->base_data;
+				if (instance_light->bake_mode != RSE::LIGHT_BAKE_DISABLED) {
+					cull_result.ddgi_lights.push_back(instance_light->instance);
+				}
+			} else if ((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) {
+				if ((idata.flags & InstanceData::FLAG_USES_BAKED_LIGHT) && (cull_data.visible_layers & idata.layer_mask)) {
+					cull_result.ddgi_geometry_instances.push_back(idata.instance_geometry);
+					mesh_visible = true;
+				}
+			}
+		}
+
 		if (mesh_visible && cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_USES_MESH_INSTANCE) {
 			cull_result.mesh_instances.push_back(cull_data.scenario->instance_data[i].instance->mesh_instance);
 		}
@@ -3312,6 +3328,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	if (p_reflection_probe.is_null()) {
 		//no rendering code here, this is only to set up what needs to be done, request regions, etc.
 		scene_render->sdfgi_update(p_render_buffers, p_environment, camera_position); //update conditions for SDFGI (whether its used or not)
+		scene_render->ddgi_update(p_render_buffers, p_environment, camera_position); //update conditions for DDGI (whether its used or not)
 	}
 
 	RENDER_TIMESTAMP("Update Visibility Dependencies");
@@ -3410,6 +3427,15 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 
 			cull.sdfgi.region_count = pending_region_count;
+		}
+	}
+
+	{ //ddgi
+		cull.ddgi.active = false;
+
+		if (p_reflection_probe.is_null() && scene_render->ddgi_is_active(p_render_buffers)) {
+			cull.ddgi.active = true;
+			cull.ddgi.bounds = scene_render->ddgi_get_bounds(p_render_buffers);
 		}
 	}
 
@@ -3679,6 +3705,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.positional_light_instances = scenario->dynamic_lights.ptr();
 			sdfgi_update_data.positional_light_count = scenario->dynamic_lights.size();
 		}
+	}
+
+	if (cull.ddgi.active) {
+		scene_render->ddgi_set_frame_data(p_render_buffers, &scene_cull_result.ddgi_geometry_instances, &scene_cull_result.ddgi_lights, &directional_lights);
 	}
 
 	//append the directional lights to the lights culled

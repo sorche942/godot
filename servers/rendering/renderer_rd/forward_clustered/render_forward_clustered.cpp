@@ -1604,6 +1604,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	}
 
 	if (render_gi) {
+		_update_ddgi(p_render_data);
 		gi.process_gi(rb, p_normal_roughness_slices, p_voxel_gi_buffer, p_render_data->environment, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances);
 	}
 
@@ -1834,6 +1835,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_separate_specular = false;
 	bool using_ssr = false;
 	bool using_sdfgi = false;
+	bool using_ddgi = false;
 	bool using_voxelgi = false;
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
@@ -1876,6 +1878,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (environment_get_sdfgi_enabled(p_render_data->environment) && get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_UNSHADED) {
 				using_sdfgi = true;
 			}
+			if (rb->has_custom_data(RB_SCOPE_DDGI) && get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_UNSHADED) {
+				using_ddgi = true;
+			}
 			if (environment_get_ssr_enabled(p_render_data->environment)) {
 				if (!p_render_data->transparent_bg) {
 					using_ssr = true;
@@ -1910,7 +1915,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// May have changed due to the above (light buffer enlarged, as an example).
 	_update_render_base_uniform_set();
 
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_ddgi, using_motion_pass);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -1928,6 +1933,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		} else if (p_render_data->environment.is_valid()) {
 			if (using_ssr ||
 					using_sdfgi ||
+					using_ddgi ||
 					environment_get_ssao_enabled(p_render_data->environment) ||
 					using_ssil ||
 					ce_needs_normal_roughness ||
@@ -2179,7 +2185,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			normal_roughness_views[v] = rb_data->get_normal_roughness(v);
 		}
 	}
-	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sdfgi || using_voxelgi, normal_roughness_views, rb_data.is_valid() && rb_data->has_voxelgi() ? rb_data->get_voxelgi() : RID());
+	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sdfgi || using_voxelgi || using_ddgi, normal_roughness_views, rb_data.is_valid() && rb_data->has_voxelgi() ? rb_data->get_voxelgi() : RID());
 
 	if (current_cluster_builder) {
 		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
@@ -4067,6 +4073,97 @@ void RenderForwardClustered::sdfgi_update(const Ref<RenderSceneBuffers> &p_rende
 		//check for updates
 		sdfgi->update(p_environment, p_world_position);
 	}
+}
+
+void RenderForwardClustered::ddgi_update(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, const Vector3 &p_world_position) {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+	Ref<RendererRD::GI::DDGI> ddgi;
+	if (rb->has_custom_data(RB_SCOPE_DDGI)) {
+		ddgi = rb->get_custom_data(RB_SCOPE_DDGI);
+	}
+
+	bool needs_ddgi = p_environment.is_valid() && environment_get_ddgi_enabled(p_environment) && gi.is_ddgi_supported();
+	bool gi_buffers_dirty = false;
+
+	if (!needs_ddgi) {
+		if (ddgi.is_valid()) {
+			ddgi.unref();
+			rb->set_custom_data(RB_SCOPE_DDGI, ddgi);
+			gi_buffers_dirty = true;
+		}
+	} else {
+		if (ddgi.is_null()) {
+			ddgi = gi.create_ddgi(p_environment, p_world_position);
+			rb->set_custom_data(RB_SCOPE_DDGI, ddgi);
+			gi_buffers_dirty = true;
+		} else {
+			if (ddgi->update_settings(p_environment)) {
+				gi_buffers_dirty = true;
+			}
+			ddgi->update_scroll(p_world_position);
+		}
+	}
+
+	if (gi_buffers_dirty && rb->has_custom_data(RB_SCOPE_GI)) {
+		// The GI apply pass caches a uniform set that references the DDGI
+		// textures (or defaults); it must be rebuilt.
+		Ref<RendererRD::GI::RenderBuffersGI> rbgi = rb->get_custom_data(RB_SCOPE_GI);
+		for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
+			if (rbgi->uniform_set[v].is_valid() && RD::get_singleton()->uniform_set_is_valid(rbgi->uniform_set[v])) {
+				RD::get_singleton()->free_rid(rbgi->uniform_set[v]);
+			}
+			rbgi->uniform_set[v] = RID();
+		}
+	}
+}
+
+bool RenderForwardClustered::ddgi_is_active(const Ref<RenderSceneBuffers> &p_render_buffers) const {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), false);
+	return rb->has_custom_data(RB_SCOPE_DDGI);
+}
+
+AABB RenderForwardClustered::ddgi_get_bounds(const Ref<RenderSceneBuffers> &p_render_buffers) const {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), AABB());
+	if (!rb->has_custom_data(RB_SCOPE_DDGI)) {
+		return AABB();
+	}
+	Ref<RendererRD::GI::DDGI> ddgi = rb->get_custom_data(RB_SCOPE_DDGI);
+	return ddgi->get_bounds();
+}
+
+void RenderForwardClustered::ddgi_set_frame_data(const Ref<RenderSceneBuffers> &p_render_buffers, const PagedArray<RenderGeometryInstance *> *p_geometry_instances, const PagedArray<RID> *p_lights, const Vector<RID> *p_directional_lights) {
+	Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+	if (!rb->has_custom_data(RB_SCOPE_DDGI)) {
+		return;
+	}
+	Ref<RendererRD::GI::DDGI> ddgi = rb->get_custom_data(RB_SCOPE_DDGI);
+	ddgi->pending_geometry_instances = p_geometry_instances;
+	ddgi->pending_lights = p_lights;
+	ddgi->pending_directional_lights = p_directional_lights;
+}
+
+void RenderForwardClustered::_update_ddgi(RenderDataRD *p_render_data) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (rb.is_null() || !rb->has_custom_data(RB_SCOPE_DDGI)) {
+		return;
+	}
+
+	Ref<RendererRD::GI::DDGI> ddgi = rb->get_custom_data(RB_SCOPE_DDGI);
+	if (ddgi->pending_geometry_instances == nullptr) {
+		// No frame data was provided (e.g. reflection probe pass).
+		return;
+	}
+
+	RendererRD::SkyRD::Sky *env_sky = nullptr;
+	if (p_render_data->environment.is_valid()) {
+		env_sky = sky.sky_owner.get_or_null(environment_get_sky(p_render_data->environment));
+	}
+
+	ddgi->update(p_render_data, env_sky);
 }
 
 int RenderForwardClustered::sdfgi_get_pending_region_count(const Ref<RenderSceneBuffers> &p_render_buffers) const {

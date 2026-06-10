@@ -759,6 +759,9 @@ private:
 	/* SDFGI */
 	void _update_sdfgi(RenderDataRD *p_render_data);
 
+	/* DDGI */
+	void _update_ddgi(RenderDataRD *p_render_data);
+
 	/* Volumetric fog */
 	RID shadow_sampler;
 
@@ -827,6 +830,13 @@ public:
 	virtual AABB sdfgi_get_pending_region_bounds(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const override;
 	virtual uint32_t sdfgi_get_pending_region_cascade(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const override;
 	RID sdfgi_get_ubo() const { return gi.sdfgi_ubo; }
+
+	/* DDGI UPDATE */
+
+	virtual void ddgi_update(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, const Vector3 &p_world_position) override;
+	virtual bool ddgi_is_active(const Ref<RenderSceneBuffers> &p_render_buffers) const override;
+	virtual AABB ddgi_get_bounds(const Ref<RenderSceneBuffers> &p_render_buffers) const override;
+	virtual void ddgi_set_frame_data(const Ref<RenderSceneBuffers> &p_render_buffers, const PagedArray<RenderGeometryInstance *> *p_geometry_instances, const PagedArray<RID> *p_lights, const Vector<RID> *p_directional_lights) override;
 
 	/* GEOMETRY INSTANCE */
 

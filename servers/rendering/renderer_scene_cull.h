@@ -901,6 +901,9 @@ public:
 		PagedArray<RenderGeometryInstance *> sdfgi_region_geometry_instances[SDFGI_MAX_CASCADES * SDFGI_MAX_REGIONS_PER_CASCADE];
 		PagedArray<RID> sdfgi_cascade_lights[SDFGI_MAX_CASCADES];
 
+		PagedArray<RenderGeometryInstance *> ddgi_geometry_instances;
+		PagedArray<RID> ddgi_lights;
+
 		void clear() {
 			geometry_instances.clear();
 			lights.clear();
@@ -924,6 +927,9 @@ public:
 			for (int i = 0; i < SDFGI_MAX_CASCADES; i++) {
 				sdfgi_cascade_lights[i].clear();
 			}
+
+			ddgi_geometry_instances.clear();
+			ddgi_lights.clear();
 		}
 
 		void reset() {
@@ -949,6 +955,9 @@ public:
 			for (int i = 0; i < SDFGI_MAX_CASCADES; i++) {
 				sdfgi_cascade_lights[i].reset();
 			}
+
+			ddgi_geometry_instances.reset();
+			ddgi_lights.reset();
 		}
 
 		void append_from(InstanceCullResult &p_cull_result) {
@@ -975,6 +984,9 @@ public:
 			for (int i = 0; i < SDFGI_MAX_CASCADES; i++) {
 				sdfgi_cascade_lights[i].merge_unordered(p_cull_result.sdfgi_cascade_lights[i]);
 			}
+
+			ddgi_geometry_instances.merge_unordered(p_cull_result.ddgi_geometry_instances);
+			ddgi_lights.merge_unordered(p_cull_result.ddgi_lights);
 		}
 
 		void init(PagedArrayPool<RID> *p_rid_pool, PagedArrayPool<RenderGeometryInstance *> *p_geometry_instance_pool, PagedArrayPool<Instance *> *p_instance_pool) {
@@ -1000,6 +1012,9 @@ public:
 			for (int i = 0; i < SDFGI_MAX_CASCADES; i++) {
 				sdfgi_cascade_lights[i].set_page_pool(p_rid_pool);
 			}
+
+			ddgi_geometry_instances.set_page_pool(p_geometry_instance_pool);
+			ddgi_lights.set_page_pool(p_rid_pool);
 		}
 	};
 
@@ -1119,6 +1134,11 @@ public:
 			uint32_t cascade_light_count = 0;
 
 		} sdfgi;
+
+		struct DDGI {
+			bool active = false;
+			AABB bounds;
+		} ddgi;
 
 		SpinLock lock;
 
@@ -1349,6 +1369,8 @@ public:
 	// SDFGI
 
 	PASS11(environment_set_sdfgi, RID, bool, int, float, RSE::EnvironmentSDFGIYScale, bool, float, bool, float, float, float)
+
+	PASS11(environment_set_ddgi, RID, bool, const Vector3i &, const Vector3 &, int, float, float, float, bool, bool, float)
 
 	PASS1RC(bool, environment_get_sdfgi_enabled, RID)
 	PASS1RC(int, environment_get_sdfgi_cascades, RID)

@@ -162,6 +162,19 @@ private:
 	float sdfgi_probe_bias = 1.1;
 	void _update_sdfgi();
 
+	// DDGI
+	bool ddgi_enabled = false;
+	Vector3i ddgi_probe_counts = Vector3i(16, 8, 16);
+	Vector3 ddgi_probe_spacing = Vector3(2.0, 2.0, 2.0);
+	int ddgi_rays_per_probe = 144;
+	float ddgi_energy = 1.0;
+	float ddgi_normal_bias = 0.2;
+	float ddgi_view_bias = 0.4;
+	bool ddgi_probe_relocation = true;
+	bool ddgi_probe_classification = true;
+	float ddgi_min_frontface_distance = 0.3;
+	void _update_ddgi();
+
 	// Glow
 	bool glow_enabled = false;
 	Vector<float> glow_levels;
@@ -348,6 +361,28 @@ public:
 	float get_sdfgi_normal_bias() const;
 	void set_sdfgi_probe_bias(float p_bias);
 	float get_sdfgi_probe_bias() const;
+
+	// DDGI
+	void set_ddgi_enabled(bool p_enabled);
+	bool is_ddgi_enabled() const;
+	void set_ddgi_probe_counts(const Vector3i &p_counts);
+	Vector3i get_ddgi_probe_counts() const;
+	void set_ddgi_probe_spacing(const Vector3 &p_spacing);
+	Vector3 get_ddgi_probe_spacing() const;
+	void set_ddgi_rays_per_probe(int p_rays);
+	int get_ddgi_rays_per_probe() const;
+	void set_ddgi_energy(float p_energy);
+	float get_ddgi_energy() const;
+	void set_ddgi_normal_bias(float p_bias);
+	float get_ddgi_normal_bias() const;
+	void set_ddgi_view_bias(float p_bias);
+	float get_ddgi_view_bias() const;
+	void set_ddgi_probe_relocation(bool p_enabled);
+	bool is_ddgi_using_probe_relocation() const;
+	void set_ddgi_probe_classification(bool p_enabled);
+	bool is_ddgi_using_probe_classification() const;
+	void set_ddgi_min_frontface_distance(float p_distance);
+	float get_ddgi_min_frontface_distance() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

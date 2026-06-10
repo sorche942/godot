@@ -72,6 +72,15 @@ public:
 	virtual AABB sdfgi_get_pending_region_bounds(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
 	virtual uint32_t sdfgi_get_pending_region_cascade(const Ref<RenderSceneBuffers> &p_render_buffers, int p_region) const = 0;
 
+	/* DDGI UPDATE */
+
+	// DDGI (raytraced probe based GI). Only implemented by renderers with
+	// raytracing support; the defaults keep it inactive.
+	virtual void ddgi_update(const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, const Vector3 &p_world_position) {}
+	virtual bool ddgi_is_active(const Ref<RenderSceneBuffers> &p_render_buffers) const { return false; }
+	virtual AABB ddgi_get_bounds(const Ref<RenderSceneBuffers> &p_render_buffers) const { return AABB(); }
+	virtual void ddgi_set_frame_data(const Ref<RenderSceneBuffers> &p_render_buffers, const PagedArray<RenderGeometryInstance *> *p_geometry_instances, const PagedArray<RID> *p_lights, const Vector<RID> *p_directional_lights) {}
+
 	/* SKY API */
 
 	virtual RID sky_allocate() = 0;
@@ -252,6 +261,19 @@ public:
 	virtual void environment_set_sdfgi_ray_count(RSE::EnvironmentSDFGIRayCount p_ray_count) = 0;
 	virtual void environment_set_sdfgi_frames_to_converge(RSE::EnvironmentSDFGIFramesToConverge p_frames) = 0;
 	virtual void environment_set_sdfgi_frames_to_update_light(RSE::EnvironmentSDFGIFramesToUpdateLight p_update) = 0;
+
+	// DDGI
+	void environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance);
+	bool environment_get_ddgi_enabled(RID p_env) const;
+	Vector3i environment_get_ddgi_probe_counts(RID p_env) const;
+	Vector3 environment_get_ddgi_probe_spacing(RID p_env) const;
+	int environment_get_ddgi_rays_per_probe(RID p_env) const;
+	float environment_get_ddgi_energy(RID p_env) const;
+	float environment_get_ddgi_normal_bias(RID p_env) const;
+	float environment_get_ddgi_view_bias(RID p_env) const;
+	bool environment_get_ddgi_probe_relocation(RID p_env) const;
+	bool environment_get_ddgi_probe_classification(RID p_env) const;
+	float environment_get_ddgi_min_frontface_distance(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

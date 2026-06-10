@@ -116,6 +116,25 @@ scene_data;
 layout(r8ui, set = 0, binding = 19) uniform restrict readonly uimage2D vrs_buffer;
 #endif
 
+/* DDGI */
+
+// DDGI resources live in their own set, bound per frame.
+// Bound as storage images: the probe atlases are written as storage images by
+// the DDGI update passes and read by the raytracing pass; keeping a single
+// usage type across the frame avoids layout transitions. Bilinear filtering is
+// done manually in ddgi_inc.glsl.
+layout(rgba16f, set = 1, binding = 0) uniform restrict readonly image2DArray ddgi_irradiance_image;
+layout(rg16f, set = 1, binding = 1) uniform restrict readonly image2DArray ddgi_distance_image;
+layout(rgba16f, set = 1, binding = 2) uniform restrict readonly image2DArray ddgi_probe_data_image;
+
+#define DDGI_INC_SAMPLING_IMAGE
+#include "ddgi_inc.glsl"
+
+layout(set = 1, binding = 3, std140) uniform DDGIVolume {
+	DDGIVolumeData data;
+}
+ddgi;
+
 layout(push_constant, std430) uniform Params {
 	uint max_voxel_gi_instances;
 	bool high_quality_vct;
@@ -483,6 +502,44 @@ void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, o
 	}
 }
 
+#ifdef USE_DDGI
+
+void ddgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, out vec4 ambient_light, out vec4 reflection_light) {
+	ambient_light = vec4(0.0);
+	reflection_light = vec4(0.0);
+
+	// `vertex` is world-oriented but relative to the camera origin; the DDGI
+	// volume lives in absolute world space.
+	vec3 world_position = vertex + scene_data.cam_transform[3].xyz;
+
+	float blend = ddgi_volume_blend_weight(world_position, ddgi.data);
+	if (blend <= 0.0) {
+		return;
+	}
+
+
+	vec3 camera_direction = normalize(vertex);
+	vec3 surface_bias = ddgi_surface_bias(normal, camera_direction, ddgi.data);
+
+	vec3 irradiance = ddgi_sample_irradiance(world_position, surface_bias, normal, ddgi.data);
+
+	// Godot multiplies the ambient buffer by albedo; 1/PI completes the Lambertian BRDF.
+	vec3 ambient = irradiance * (ddgi.data.energy / DDGI_PI);
+	ambient_light = vec4(ambient, blend);
+
+	// Glossy support: for rough reflections, sample the irradiance field along
+	// the reflection vector. Smooth reflections are left to reflection
+	// probes/SSR (alpha ramps down so they take over).
+	float glossy_blend = clamp((roughness - 0.2) * 1.25, 0.0, 1.0);
+	if (glossy_blend > 0.0) {
+		vec3 glossy_irradiance = ddgi_sample_irradiance(world_position, surface_bias, reflection, ddgi.data);
+		vec3 glossy = glossy_irradiance * (ddgi.data.energy / DDGI_2PI);
+		reflection_light = vec4(glossy, blend * glossy_blend);
+	}
+}
+
+#endif // USE_DDGI
+
 //standard voxel cone trace
 vec4 voxel_cone_trace(texture3D probe, vec3 cell_size, vec3 pos, vec3 direction, float tan_half_angle, float max_distance, float p_bias) {
 	float dist = p_bias;
@@ -632,6 +689,10 @@ void process_gi(ivec2 pos, vec3 vertex, inout vec4 ambient_light, inout vec4 ref
 
 #ifdef USE_SDFGI
 		sdfgi_process(vertex, normal, reflection, roughness, ambient_light, reflection_light);
+#endif
+
+#ifdef USE_DDGI
+		ddgi_process(vertex, normal, reflection, roughness, ambient_light, reflection_light);
 #endif
 
 #ifdef USE_VOXEL_GI_INSTANCES
