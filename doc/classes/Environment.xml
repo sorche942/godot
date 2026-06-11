@@ -85,6 +85,7 @@
 		<member name="ddgi_enabled" type="bool" setter="set_ddgi_enabled" getter="is_ddgi_enabled" default="false" experimental="">
 			If [code]true[/code], enables DDGI (Dynamic Diffuse Global Illumination): a fully dynamic, real-time global illumination technique based on NVIDIA's RTXGI. A camera-centered, infinitely scrolling grid of light probes is updated every frame using hardware raytracing, providing diffuse indirect lighting with infinite bounces, rough specular reflections, and raytraced occlusion to prevent light leaking.
 			[b]Note:[/b] DDGI is only supported in the Forward+ rendering method, on GPUs with hardware raytracing support.
+			Mesh instances, multimeshes (up to 1024 instances each) and deformed (skinned or blend shaped) meshes contribute to the global illumination. Particles do not contribute.
 		</member>
 		<member name="ddgi_energy" type="float" setter="set_ddgi_energy" getter="get_ddgi_energy" default="1.0" experimental="">
 			The energy multiplier applied to indirect light sampled from the DDGI probes.

@@ -4260,11 +4260,39 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	if (pending_geometry_instances != nullptr) {
 		for (uint64_t i = 0; i < pending_geometry_instances->size(); i++) {
 			RenderGeometryInstanceBase *inst = static_cast<RenderGeometryInstanceBase *>((*pending_geometry_instances)[i]);
-			if (inst == nullptr || inst->data == nullptr || inst->data->base_type != RSE::INSTANCE_MESH) {
+			if (inst == nullptr || inst->data == nullptr) {
 				continue;
 			}
 
-			RID mesh = inst->data->base;
+			RID mesh;
+			RID multimesh;
+			int multimesh_count = 0;
+			bool deformed = false;
+
+			if (inst->data->base_type == RSE::INSTANCE_MESH) {
+				mesh = inst->data->base;
+				// Skinned / blend shape instances have a per-instance deformed copy.
+				deformed = inst->mesh_instance.is_valid();
+			} else if (inst->data->base_type == RSE::INSTANCE_MULTIMESH) {
+				multimesh = inst->data->base;
+				mesh = mesh_storage->multimesh_get_mesh(multimesh);
+				if (mesh.is_null()) {
+					continue;
+				}
+				multimesh_count = mesh_storage->multimesh_get_instance_count(multimesh);
+				int visible = mesh_storage->multimesh_get_visible_instances(multimesh);
+				if (visible >= 0) {
+					multimesh_count = MIN(multimesh_count, visible);
+				}
+				// Keep pathological cases (e.g. huge grass fields) bounded.
+				multimesh_count = MIN(multimesh_count, 1024);
+				if (multimesh_count == 0) {
+					continue;
+				}
+			} else {
+				continue;
+			}
+
 			uint32_t surface_count = 0;
 			const RID *materials = mesh_storage->mesh_get_surface_count_and_materials(mesh, surface_count);
 			if (materials == nullptr) {
@@ -4273,6 +4301,15 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 
 			// Motion detection: probes near geometry that moved (or appeared)
 			// bypass the convergence freeze in the blend pass.
+			if (deformed) {
+				// Bones / blend shapes deform continuously without transform changes.
+				AABB region = inst->transformed_aabb.grow(motion_margin);
+				if (motion_regions.size() < 8) {
+					motion_regions.push_back(region);
+				} else {
+					motion_regions[7] = motion_regions[7].merge(region);
+				}
+			}
 			{
 				TrackedInstance *tracked = tracked_instances.getptr(inst);
 				if (tracked == nullptr) {
@@ -4306,7 +4343,14 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				}
 
 				RendererRD::MeshStorage::MeshSurfaceRTData rt_data;
-				if (!mesh_storage->mesh_surface_get_rt_data(surface, rt_data)) {
+				bool has_rt_data = false;
+				if (deformed) {
+					has_rt_data = mesh_storage->mesh_instance_surface_get_rt_data(inst->mesh_instance, s, rt_data);
+				}
+				if (!has_rt_data) {
+					has_rt_data = mesh_storage->mesh_surface_get_rt_data(surface, rt_data);
+				}
+				if (!has_rt_data) {
 					continue;
 				}
 
@@ -4363,8 +4407,17 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 					}
 				}
 
+				// Multimesh instances fan out into one TLAS entry per visible
+				// instance, all sharing the surface's BLAS.
+				int fan_count = multimesh.is_valid() ? multimesh_count : 1;
+				for (int mm = 0; mm < fan_count; mm++) {
+				Transform3D fan_xform = inst->transform;
+				if (multimesh.is_valid()) {
+					fan_xform = fan_xform * mesh_storage->multimesh_instance_get_transform(multimesh, mm);
+				}
+
 				RD::AccelerationStructureInstance tlas_instance;
-				tlas_instance.transform = inst->transform;
+				tlas_instance.transform = fan_xform;
 				tlas_instance.id = uint32_t(instance_data.size());
 				tlas_instance.mask = 0xFF;
 				tlas_instance.hit_sbt_range = gi->ddgi_shader.hit_sbt_range;
@@ -4375,7 +4428,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				tlas_instances.push_back(tlas_instance);
 
 				InstanceDataSSBO data = {};
-				const Transform3D &xform = inst->transform;
+				const Transform3D &xform = fan_xform;
 				for (int row = 0; row < 3; row++) {
 					data.xform[row * 4 + 0] = xform.basis.rows[row][0];
 					data.xform[row * 4 + 1] = xform.basis.rows[row][1];
@@ -4395,7 +4448,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				data.emission[3] = 1.0;
 
 				float emission_luminance = data.emission[0] * 0.2126f + data.emission[1] * 0.7152f + data.emission[2] * 0.0722f;
-				if (emission_luminance > 0.05f) {
+				if (emission_luminance > 0.05f && multimesh.is_null()) {
+					// Multimesh emitters keep the (noisier) random-hit path; their
+					// per-instance bounds aren't tracked individually.
 					EmissiveVPL vpl;
 					vpl.position = inst->transformed_aabb.get_center();
 					vpl.radius = MAX(0.05f, float(inst->transformed_aabb.size.length()) * 0.5f);
@@ -4409,6 +4464,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				data.uv_scale_offset[2] = uv1_offset.x;
 				data.uv_scale_offset[3] = uv1_offset.y;
 				instance_data.push_back(data);
+				}
 			}
 		}
 	}

@@ -201,6 +201,14 @@ private:
 			uint32_t previous_buffer = 0;
 			uint64_t last_change = 0;
 
+			// Per-instance raytracing data for deformed (skinned / blend shape)
+			// surfaces; re-unrolled and rebuilt from the deformed vertex buffer.
+			RID rt_vertex_buffer;
+			uint64_t rt_vertex_buffer_address = 0;
+			uint32_t rt_vertex_count = 0;
+			RID rt_blas;
+			bool rt_build_failed = false;
+
 			Mesh::Surface::Version *versions = nullptr; //allocated on demand
 			uint32_t version_count = 0;
 		};
@@ -374,6 +382,8 @@ private:
 	bool rt_acceleration_structures_supported = false;
 
 	bool _mesh_surface_build_rt_data(Mesh::Surface *s);
+	bool _mesh_surface_fill_rt_unroll_constants(Mesh::Surface *s, RTUnrollShader::PushConstant &r_push_constant, uint32_t &r_output_vertex_count);
+	void _mesh_surface_run_rt_unroll(RID p_source_vertex_buffer, RID p_dest_vertex_buffer, uint32_t p_output_vertex_count, const RTUnrollShader::PushConstant &p_push_constant);
 
 	struct Skeleton {
 		bool use_2d = false;
@@ -427,6 +437,9 @@ public:
 	// Returns (building lazily) the raytracing data of a mesh surface. Returns false for
 	// surfaces that cannot be raytraced (non-triangles, 2D meshes).
 	bool mesh_surface_get_rt_data(void *p_surface, MeshSurfaceRTData &r_rt_data);
+	// Deformed (skinned / blend shape) variant; refreshes the unroll and BLAS
+	// from the instance's current vertex buffer every call.
+	bool mesh_instance_surface_get_rt_data(RID p_mesh_instance, uint32_t p_surface, MeshSurfaceRTData &r_rt_data);
 
 	/* MESH API */
 
