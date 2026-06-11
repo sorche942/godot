@@ -815,7 +815,15 @@ public:
 
 			float sky_color[3];
 			float exposure_normalization;
-		};
+		
+			// World-space regions around geometry that moved this frame; probes
+			// inside them bypass the convergence freeze so moving objects keep
+			// responsive GI shadows.
+			float motion_region_min[8][4];
+			float motion_region_max[8][4];
+			int32_t motion_region_count;
+			int32_t motion_pad[3];
+};
 
 		// Mirrors InstanceData in ddgi.glsl (std430).
 		struct InstanceDataSSBO {
@@ -873,6 +881,14 @@ public:
 
 		RID ray_data_tex;
 		RID irradiance_tex;
+		// Low-hysteresis copy of the irradiance atlas, used only as the input
+		// of the infinite-bounce feedback (hit shading). Decoupling it from the
+		// display atlas lets the bounce chain converge quickly while the
+		// displayed lighting stays temporally stable.
+		RID irradiance_fast_tex;
+		// Per-probe mean (fast - stable) gap and brightness from the previous
+		// frame; a coherent probe-wide pending change unfreezes all its texels.
+		RID probe_change_tex;
 		RID distance_tex;
 		RID probe_data_tex;
 
@@ -886,6 +902,15 @@ public:
 		// Sky bindings captured during update() for the reflections pass.
 		RID last_sky_2d;
 		RID last_sky_array;
+
+		// Per-instance transform tracking for motion-aware probe invalidation.
+		struct TrackedInstance {
+			Transform3D xform;
+			AABB aabb;
+			uint64_t last_seen_frame = 0;
+		};
+		HashMap<RenderGeometryInstance *, TrackedInstance> tracked_instances;
+		LocalVector<AABB> motion_regions;
 
 		// Per-view parameter UBOs for the reflections pass (push constants are
 		// not reliable in raytracing lists yet).

@@ -4042,8 +4042,10 @@ bool GI::DDGI::update_settings(RID p_env) {
 	if (ray_data_tex.is_valid()) {
 		RD::get_singleton()->free_rid(ray_data_tex);
 		RD::get_singleton()->free_rid(irradiance_tex);
+		RD::get_singleton()->free_rid(irradiance_fast_tex);
 		RD::get_singleton()->free_rid(distance_tex);
 		RD::get_singleton()->free_rid(probe_data_tex);
+		RD::get_singleton()->free_rid(probe_change_tex);
 	}
 
 	{
@@ -4066,6 +4068,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		tf.array_layers = probe_counts.y;
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		irradiance_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		irradiance_fast_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	}
 
 	{
@@ -4088,6 +4091,17 @@ bool GI::DDGI::update_settings(RID p_env) {
 		tf.array_layers = probe_counts.y;
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		probe_data_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
+	}
+
+	{
+		RD::TextureFormat tf;
+		tf.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+		tf.format = RD::DATA_FORMAT_R16G16_SFLOAT;
+		tf.width = probe_counts.x;
+		tf.height = probe_counts.z;
+		tf.array_layers = probe_counts.y;
+		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		probe_change_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	}
 
 	needs_reset = true;
@@ -4148,11 +4162,19 @@ void GI::DDGI::fill_volume_ubo(VolumeDataUBO &r_ubo) const {
 	r_ubo.origin[2] = 0.0;
 	r_ubo.probe_hysteresis = 0.97;
 
-	// Random rotation applied to the non-fixed probe rays each frame (Shoemake).
+	// Rotation applied to the non-fixed probe rays each frame, mapped to a
+	// quaternion with Shoemake's method. The inputs come from the R3
+	// low-discrepancy sequence (instead of white noise) so the rotations of
+	// nearby frames stratify the sphere; this significantly lowers the
+	// variance of the temporally blended estimate.
 	{
-		float u1 = Math::randf();
-		float u2 = Math::randf();
-		float u3 = Math::randf();
+		// Plastic constant alphas for the R3 sequence.
+		const double a1 = 0.8191725133961644;
+		const double a2 = 0.6710436067037892;
+		const double a3 = 0.5497004779019703;
+		float u1 = float(Math::fmod(0.5 + a1 * double(frame), 1.0));
+		float u2 = float(Math::fmod(0.5 + a2 * double(frame), 1.0));
+		float u3 = float(Math::fmod(0.5 + a3 * double(frame), 1.0));
 		float sq1 = Math::sqrt(1.0f - u1);
 		float sq2 = Math::sqrt(u1);
 		r_ubo.probe_ray_rotation[0] = sq1 * Math::sin(float(Math::TAU) * u2);
@@ -4194,9 +4216,12 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	if (needs_reset) {
 		RD::get_singleton()->texture_clear(ray_data_tex, Color(0, 0, 0, 0), 0, 1, 0, probe_counts.y);
 		RD::get_singleton()->texture_clear(irradiance_tex, Color(0, 0, 0, 0), 0, 1, 0, probe_counts.y);
+		RD::get_singleton()->texture_clear(irradiance_fast_tex, Color(0, 0, 0, 0), 0, 1, 0, probe_counts.y);
 		RD::get_singleton()->texture_clear(distance_tex, Color(0, 0, 0, 0), 0, 1, 0, probe_counts.y);
 		// Zero offsets and the active state.
 		RD::get_singleton()->texture_clear(probe_data_tex, Color(0, 0, 0, 0), 0, 1, 0, probe_counts.y);
+		// High change, zero brightness: everything starts responsive.
+		RD::get_singleton()->texture_clear(probe_change_tex, Color(1, 0, 0, 0), 0, 1, 0, probe_counts.y);
 		needs_reset = false;
 	}
 
@@ -4215,6 +4240,23 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 
 	HashMap<RID, uint32_t> albedo_texture_indices;
 
+	// Bright emissive surfaces become virtual lights ("emissive next-event
+	// estimation"): sampled analytically with shadow rays in hit shading
+	// instead of relying on probe rays randomly hitting them, which is the
+	// dominant noise source in emissive-lit scenes. Their direct emission is
+	// excluded from probe-ray hits to avoid double counting.
+	struct EmissiveVPL {
+		Vector3 position;
+		float radius = 0.0f;
+		Color color;
+		uint32_t instance_index = 0;
+		float power = 0.0f;
+	};
+	LocalVector<EmissiveVPL> emissive_vpls;
+
+	motion_regions.clear();
+	const float motion_margin = probe_spacing.length();
+
 	if (pending_geometry_instances != nullptr) {
 		for (uint64_t i = 0; i < pending_geometry_instances->size(); i++) {
 			RenderGeometryInstanceBase *inst = static_cast<RenderGeometryInstanceBase *>((*pending_geometry_instances)[i]);
@@ -4227,6 +4269,34 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 			const RID *materials = mesh_storage->mesh_get_surface_count_and_materials(mesh, surface_count);
 			if (materials == nullptr) {
 				continue;
+			}
+
+			// Motion detection: probes near geometry that moved (or appeared)
+			// bypass the convergence freeze in the blend pass.
+			{
+				TrackedInstance *tracked = tracked_instances.getptr(inst);
+				if (tracked == nullptr) {
+					TrackedInstance ti;
+					ti.xform = inst->transform;
+					ti.aabb = inst->transformed_aabb;
+					ti.last_seen_frame = frame;
+					tracked_instances.insert(inst, ti);
+					if (frame > 1 && motion_regions.size() < 8) {
+						motion_regions.push_back(inst->transformed_aabb.grow(motion_margin));
+					}
+				} else {
+					if (!tracked->xform.is_equal_approx(inst->transform)) {
+						AABB region = tracked->aabb.merge(inst->transformed_aabb).grow(motion_margin);
+						if (motion_regions.size() < 8) {
+							motion_regions.push_back(region);
+						} else {
+							motion_regions[7] = motion_regions[7].merge(region);
+						}
+					}
+					tracked->xform = inst->transform;
+					tracked->aabb = inst->transformed_aabb;
+					tracked->last_seen_frame = frame;
+				}
 			}
 
 			for (uint32_t s = 0; s < surface_count; s++) {
@@ -4323,6 +4393,17 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				data.emission[1] = emission.g * emission_energy;
 				data.emission[2] = emission.b * emission_energy;
 				data.emission[3] = 1.0;
+
+				float emission_luminance = data.emission[0] * 0.2126f + data.emission[1] * 0.7152f + data.emission[2] * 0.0722f;
+				if (emission_luminance > 0.05f) {
+					EmissiveVPL vpl;
+					vpl.position = inst->transformed_aabb.get_center();
+					vpl.radius = MAX(0.05f, float(inst->transformed_aabb.size.length()) * 0.5f);
+					vpl.color = Color(data.emission[0], data.emission[1], data.emission[2]);
+					vpl.instance_index = uint32_t(instance_data.size());
+					vpl.power = emission_luminance * vpl.radius * vpl.radius;
+					emissive_vpls.push_back(vpl);
+				}
 				data.uv_scale_offset[0] = uv1_scale.x;
 				data.uv_scale_offset[1] = uv1_scale.y;
 				data.uv_scale_offset[2] = uv1_offset.x;
@@ -4330,6 +4411,38 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				instance_data.push_back(data);
 			}
 		}
+	}
+
+	// Instances that disappeared this frame leave a motion region behind.
+	{
+		LocalVector<RenderGeometryInstance *> stale;
+		for (KeyValue<RenderGeometryInstance *, TrackedInstance> &E : tracked_instances) {
+			if (E.value.last_seen_frame != frame) {
+				if (motion_regions.size() < 8) {
+					motion_regions.push_back(E.value.aabb.grow(motion_margin));
+				} else {
+					motion_regions[7] = motion_regions[7].merge(E.value.aabb.grow(motion_margin));
+				}
+				stale.push_back(E.key);
+			}
+		}
+		for (RenderGeometryInstance *key : stale) {
+			tracked_instances.erase(key);
+		}
+	}
+
+	const uint32_t MAX_EMISSIVE_VPLS = 8;
+	if (emissive_vpls.size() > MAX_EMISSIVE_VPLS) {
+		struct PowerComparator {
+			bool operator()(const EmissiveVPL &a, const EmissiveVPL &b) const { return a.power > b.power; }
+		};
+		SortArray<EmissiveVPL, PowerComparator> sorter;
+		sorter.sort(emissive_vpls.ptr(), emissive_vpls.size());
+		emissive_vpls.resize(MAX_EMISSIVE_VPLS);
+	}
+	for (const EmissiveVPL &vpl : emissive_vpls) {
+		// Probe-ray hits skip the emission of instances handled analytically.
+		instance_data[vpl.instance_index].emission[3] = 0.0;
 	}
 
 	uint32_t instance_count = instance_data.size();
@@ -4466,6 +4579,24 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 			}
 		}
 
+		for (uint32_t i = 0; i < emissive_vpls.size() && light_count < MAX_LIGHTS; i++) {
+			const EmissiveVPL &vpl = emissive_vpls[i];
+			Light &l = lights[light_count];
+			l = {};
+			l.type = 3; // LIGHT_TYPE_EMISSIVE in ddgi.glsl.
+			l.color[0] = vpl.color.r;
+			l.color[1] = vpl.color.g;
+			l.color[2] = vpl.color.b;
+			l.energy = 1.0;
+			l.has_shadow = 1;
+			l.position[0] = vpl.position.x;
+			l.position[1] = vpl.position.y;
+			l.position[2] = vpl.position.z;
+			l.radius = vpl.radius;
+			l.cos_spot_angle = float(vpl.instance_index); // Source instance, for self-exclusion.
+			light_count++;
+		}
+
 		if (light_count > 0) {
 			RD::get_singleton()->buffer_update(lights_buffer, 0, light_count * sizeof(Light), lights);
 		}
@@ -4478,6 +4609,18 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 		VolumeDataUBO ubo = {};
 		fill_volume_ubo(ubo);
 		ubo.light_count = light_count;
+
+		ubo.motion_region_count = int32_t(MIN(motion_regions.size(), 8u));
+		for (int32_t r = 0; r < ubo.motion_region_count; r++) {
+			const AABB &region = motion_regions[r];
+			Vector3 region_end = region.get_end();
+			ubo.motion_region_min[r][0] = region.position.x;
+			ubo.motion_region_min[r][1] = region.position.y;
+			ubo.motion_region_min[r][2] = region.position.z;
+			ubo.motion_region_max[r][0] = region_end.x;
+			ubo.motion_region_max[r][1] = region_end.y;
+			ubo.motion_region_max[r][2] = region_end.z;
+		}
 
 		ubo.sky_mode = SKY_MODE_COLOR;
 		ubo.sky_color[0] = 0.0;
@@ -4516,6 +4659,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	/* Trace probe rays. */
 
 
+
 	RID sky_2d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
 	RID sky_array = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
 	if (p_sky != nullptr && p_sky->radiance.is_valid()) {
@@ -4552,7 +4696,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, instance_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, lights_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ray_data_tex),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, irradiance_tex),
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, irradiance_fast_tex),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, distance_tex),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, probe_data_tex),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 8, linear_sampler),
@@ -4573,7 +4717,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, volume_ubo),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, ray_data_tex),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, irradiance_tex),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, probe_data_tex));
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, probe_data_tex),
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, irradiance_fast_tex),
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, probe_change_tex));
 
 	RID blend_distance_set = UniformSetCacheRD::get_singleton()->get_cache(gi->ddgi_shader.blend.version_get_shader(gi->ddgi_shader.blend_version, DDGIShader::BLEND_MODE_DISTANCE), 0,
 			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, volume_ubo),
@@ -4626,12 +4772,16 @@ void GI::DDGI::free_data() {
 	if (ray_data_tex.is_valid()) {
 		RD::get_singleton()->free_rid(ray_data_tex);
 		RD::get_singleton()->free_rid(irradiance_tex);
+		RD::get_singleton()->free_rid(irradiance_fast_tex);
 		RD::get_singleton()->free_rid(distance_tex);
 		RD::get_singleton()->free_rid(probe_data_tex);
+		RD::get_singleton()->free_rid(probe_change_tex);
 		ray_data_tex = RID();
 		irradiance_tex = RID();
+		irradiance_fast_tex = RID();
 		distance_tex = RID();
 		probe_data_tex = RID();
+		probe_change_tex = RID();
 	}
 	if (volume_ubo.is_valid()) {
 		RD::get_singleton()->free_rid(volume_ubo);
@@ -4748,7 +4898,7 @@ void GI::process_rt_reflections(Ref<RenderSceneBuffersRD> p_render_buffers, Rend
 				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, ddgi->volume_ubo),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, ddgi->instance_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, ddgi->lights_buffer),
-				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ddgi->irradiance_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ddgi->irradiance_fast_tex),
 				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, ddgi->distance_tex),
 				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, ddgi->probe_data_tex),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 7, linear_sampler),

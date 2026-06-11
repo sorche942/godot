@@ -60,6 +60,13 @@ struct DDGIVolumeData {
 
 	vec3 sky_color;
 	float exposure_normalization;
+	vec4 motion_region_min[8];
+	vec4 motion_region_max[8];
+
+	int motion_region_count;
+	int motion_pad0;
+	int motion_pad1;
+	int motion_pad2;
 };
 
 /* Quaternion helpers */

@@ -30,6 +30,8 @@ layout(set = 0, binding = 7) uniform sampler linear_sampler;
 #define LIGHT_TYPE_DIRECTIONAL 0
 #define LIGHT_TYPE_OMNI 1
 #define LIGHT_TYPE_SPOT 2
+// Virtual light for a bright emissive surface (emissive next-event estimation).
+#define LIGHT_TYPE_EMISSIVE 3
 
 struct DDGIRayPayload {
 	float hit_t; // > 0: frontface hit, < 0: backface hit (negated), 1e27: miss.
@@ -142,7 +144,7 @@ bool trace_shadow_ray(vec3 origin, vec3 direction, float max_distance) {
 	return payload.hit_t > 0.0;
 }
 
-vec3 evaluate_direct_light(vec3 position, vec3 normal) {
+vec3 evaluate_direct_light(vec3 position, vec3 normal, uint shaded_instance) {
 	vec3 light_accum = vec3(0.0);
 
 	for (int i = 0; i < ddgi.data.light_count; i++) {
@@ -175,6 +177,17 @@ vec3 evaluate_direct_light(vec3 position, vec3 normal) {
 				float scos = max(cos_angle, cos_spot_angle);
 				float spot_rim = max(0.0001, (1.0 - scos) / (1.0 - cos_spot_angle));
 				attenuation *= 1.0 - pow(spot_rim, lights.data[i].inv_spot_attenuation);
+			} break;
+			case LIGHT_TYPE_EMISSIVE: {
+				if (uint(lights.data[i].cos_spot_angle) == shaded_instance) {
+					continue;
+				}
+				vec3 rel_vec = lights.data[i].position - position;
+				float center_distance = length(rel_vec);
+				direction = rel_vec / center_distance;
+				float r = lights.data[i].radius;
+				attenuation = (DDGI_PI * r * r) / max(center_distance * center_distance, r * r);
+				light_distance = max(center_distance - r, 0.0);
 			} break;
 			default: {
 				continue;
@@ -320,7 +333,7 @@ void main() {
 
 		vec3 hit_position = origin + reflect_dir * hit_t;
 
-		vec3 direct = evaluate_direct_light(hit_position, hit_normal);
+		vec3 direct = evaluate_direct_light(hit_position, hit_normal, payload.instance_index);
 
 		vec3 irradiance = vec3(0.0);
 		float volume_weight = ddgi_volume_blend_weight(hit_position, ddgi.data);

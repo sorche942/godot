@@ -38,6 +38,21 @@ layout(rg16f, set = 0, binding = 2) uniform restrict coherent image2DArray outpu
 
 layout(rgba16f, set = 0, binding = 3) uniform restrict readonly image2DArray probe_data;
 
+#ifdef MODE_IRRADIANCE
+// Low-hysteresis atlas feeding the infinite-bounce loop (see gi.h).
+layout(rgba16f, set = 0, binding = 4) uniform restrict coherent image2DArray fast_output_texture;
+// Per-probe mean pending change (r) and brightness (g) from last frame.
+layout(rg16f, set = 0, binding = 5) uniform restrict coherent image2DArray probe_change;
+
+// Probe-wide reduction of the pending change: real lighting changes are
+// coherent across a probe's texels while noise is independent per texel, so
+// the probe mean separates them with a ~6x lower noise floor. Accumulated with
+// atomics (no mid-flow barrier needed) and published for the next frame.
+shared int s_gap_sum_fp;
+shared int s_brightness_sum_fp;
+#define PROBE_STAT_FP_SCALE 4096.0
+#endif
+
 float linear_rgb_to_luminance(vec3 rgb) {
 	return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
 }
@@ -64,6 +79,9 @@ void update_border_texel(ivec3 thread_coords, ivec3 group_thread, ivec3 group_id
 	}
 
 	imageStore(output_texture, thread_coords, imageLoad(output_texture, copy_coords));
+#ifdef MODE_IRRADIANCE
+	imageStore(fast_output_texture, thread_coords, imageLoad(fast_output_texture, copy_coords));
+#endif
 }
 
 void main() {
@@ -83,12 +101,42 @@ void main() {
 		return;
 	}
 
+#ifdef MODE_IRRADIANCE
+	if (gl_LocalInvocationIndex == 0) {
+		s_gap_sum_fp = 0;
+		s_brightness_sum_fp = 0;
+	}
+#endif
+	barrier();
+
+	// Probes inside a motion region (geometry moved nearby this frame) bypass
+	// the convergence freeze and the firefly envelope so moving objects keep
+	// responsive, coherent GI shadows.
+	bool probe_in_motion = false;
+	if (ddgi.data.motion_region_count > 0) {
+		ivec3 storage_grid_coords = ddgi_probe_coords(probe_index, ddgi.data);
+		ivec3 spatial_coords = ((storage_grid_coords - ddgi.data.probe_scroll_offsets) % ddgi.data.probe_counts + ddgi.data.probe_counts) % ddgi.data.probe_counts;
+		vec3 probe_world = ddgi_probe_world_position_base(spatial_coords, ddgi.data);
+		if ((ddgi.data.flags & DDGI_FLAG_PROBE_RELOCATION) != 0) {
+			probe_world += imageLoad(probe_data, ddgi_probe_texel_coords(probe_index, ddgi.data)).xyz * ddgi.data.probe_spacing;
+		}
+		for (int r = 0; r < ddgi.data.motion_region_count; r++) {
+			if (all(greaterThanEqual(probe_world, ddgi.data.motion_region_min[r].xyz)) && all(lessThanEqual(probe_world, ddgi.data.motion_region_max[r].xyz))) {
+				probe_in_motion = true;
+				break;
+			}
+		}
+	}
+
 	if (!is_border_texel) {
 		ivec3 storage_coords = ddgi_probe_texel_coords(probe_index, ddgi.data);
 
 		// Clear and skip blending for probes that scrolled to a new position this frame.
 		if (ddgi_probe_scroll_cleared(storage_coords, ddgi.data)) {
 			imageStore(output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
+#ifdef MODE_IRRADIANCE
+			imageStore(fast_output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
+#endif
 		} else {
 			bool use_classification = (ddgi.data.flags & DDGI_FLAG_PROBE_CLASSIFICATION) != 0;
 			if (use_classification && imageLoad(probe_data, storage_coords).w == DDGI_PROBE_STATE_INACTIVE) {
@@ -158,40 +206,138 @@ void main() {
 					result.rgb *= 1.0 / (2.0 * max(result.a, epsilon));
 					result.a = 1.0;
 
-					vec3 previous = imageLoad(output_texture, thread_coords).rgb;
+					vec4 previous_texel = imageLoad(output_texture, thread_coords);
+					vec3 previous = previous_texel.rgb;
 
 					// Freshly cleared probes (reset or scrolled) adopt the new value
 					// immediately instead of slowly converging from black.
+#ifdef MODE_IRRADIANCE
+					// The alpha channel is never written as zero by the blend, so it
+					// doubles as the "cleared" marker; testing rgb would re-trigger
+					// for texels whose converged value is genuinely black.
+					bool probe_reset = previous_texel.a == 0.0;
+#else
 					bool probe_reset = dot(previous, previous) == 0.0;
+#endif
 					float hysteresis = probe_reset ? 0.0 : ddgi.data.probe_hysteresis;
 
 #ifdef MODE_IRRADIANCE
 					// Tone-mapping gamma adjustment.
 					result.rgb = pow(result.rgb, vec3(1.0 / ddgi.data.irradiance_gamma));
 
+					// Fast feedback atlas: converges in a few frames so the bounce
+					// chain isn't throttled by the display hysteresis. Mild blending
+					// keeps its noise from echoing into the estimates.
+					vec3 fast_previous = imageLoad(fast_output_texture, thread_coords).rgb;
+					{
+						float fast_hysteresis = probe_reset ? 0.0 : 0.8;
+						imageStore(fast_output_texture, thread_coords, vec4(mix(result.rgb, fast_previous, fast_hysteresis), 1.0));
+					}
+
+					if (!probe_reset && !probe_in_motion) {
+						// Firefly suppression: rare lucky rays hitting small bright
+						// emitters spike the estimate of otherwise dim texels and keep
+						// them from ever converging. Envelope the estimate relative to
+						// the converged value (encoded space, so 2x encoded = 32x
+						// linear: a persistent change blasts through in a few frames).
+						// Skipped during motion: it slows shadow recovery.
+						result.rgb = min(result.rgb, previous * 2.0 + (1.0 / 64.0));
+					}
+
 					vec3 delta = result.rgb - previous;
+
+					// Convergence detection: an EMA of the *signed* per-frame change
+					// (stored in the spare alpha channel). The per-frame ray estimate
+					// is noisy but zero-mean once converged, so the EMA decays towards
+					// zero; a real lighting change pushes it consistently in one
+					// direction and revives it within a few frames.
+					// Encoded at 2x in alpha to keep EMA steps above fp16 quantization.
+					float signed_change = clamp(delta.r + delta.g + delta.b, -0.5, 0.5);
+					float change_ema = probe_reset ? 0.5 : mix((previous_texel.a - 0.5), signed_change, 0.06);
+
+					// Relative knee: per-frame estimate noise is roughly proportional
+					// to the texel's brightness, so the "converged" threshold must be
+					// too. Real lighting changes above ~8% revive the EMA and bring
+					// back the responsive hysteresis within a few frames.
+					float previous_sum = previous.r + previous.g + previous.b;
+					float convergence_knee = max(0.01, 0.03 * previous_sum);
+
+					// Two independent change statistics must agree to unfreeze:
+					// - the signed-delta EMA (long window; zero-mean noise decays),
+					// - the gap between the fast feedback atlas and the displayed
+					//   value (short window; measures the pending change directly).
+					// Their false positives multiply, so each knee can be sensitive
+					// without reintroducing shimmer.
+					float signed_gap = (fast_previous.r + fast_previous.g + fast_previous.b) - previous_sum;
+					float gap_evidence = smoothstep(convergence_knee * 0.75, convergence_knee * 2.5, abs(signed_gap));
+					float ema_evidence = smoothstep(convergence_knee * 0.25, convergence_knee, abs(change_ema));
+					// A real change drives both statistics in the same direction;
+					// noise only agrees half the time.
+					float sign_agreement = (signed_gap * change_ema > 0.0) ? 1.0 : 0.0;
+					float change_evidence = ema_evidence * gap_evidence * sign_agreement;
+
+					// Probe-coherent pending change (previous frame's reduction):
+					// unfreezes and accelerates the whole probe through the slow
+					// settling tail that per-texel statistics cannot separate from
+					// noise.
+					atomicAdd(s_gap_sum_fp, int(signed_gap * PROBE_STAT_FP_SCALE));
+					atomicAdd(s_brightness_sum_fp, int(previous_sum * PROBE_STAT_FP_SCALE));
+					vec2 probe_stat = imageLoad(probe_change, storage_coords).rg;
+					float probe_rel_gap = abs(probe_stat.r) / max(0.05, probe_stat.g);
+					float probe_evidence = smoothstep(0.02, 0.06, probe_rel_gap);
+					change_evidence = max(change_evidence, probe_evidence);
+
+					float convergence = 1.0 - change_evidence;
+					// Strong agreement proves the change is real and substantial;
+					// blend much faster to collapse the convergence tail.
+					float consistency = change_evidence * max(smoothstep(convergence_knee, convergence_knee * 4.0, abs(change_ema)), probe_evidence);
 
 					if (!probe_reset) {
 						if (max_component(previous - result.rgb) > ddgi.data.irradiance_threshold) {
 							// Lower the hysteresis when a large lighting change is detected.
 							hysteresis = max(0.0, hysteresis - 0.75);
+							convergence = 0.0;
 						}
 
-						if (linear_rgb_to_luminance(delta) > ddgi.data.brightness_threshold) {
-							// Clamp the maximum per-update change when a large brightness change is detected.
+						if (consistency < 0.5 && linear_rgb_to_luminance(delta) > ddgi.data.brightness_threshold) {
+							// Clamp the maximum per-update change when a large
+							// brightness change is detected, unless the EMA already
+							// vouches that the change is consistent.
 							delta *= 0.25;
 						}
 					}
 
+					// Converged texels FREEZE (hysteresis 1): the per-frame ray
+					// estimate never stops being noisy, so any blend-through keeps a
+					// visible random walk alive. The change EMA in alpha keeps
+					// updating regardless, and any consistent drift of the estimates
+					// (even a slow one: slow changes have a consistent sign) revives
+					// the responsive hysteresis within a few frames.
+					// Verified-change acceleration first, then the freeze; the two
+					// regimes are mutually exclusive by construction.
+					hysteresis = mix(hysteresis, 0.5, consistency);
+					hysteresis = mix(hysteresis, 1.0, convergence);
+
+					if (probe_in_motion) {
+						// Track moving geometry quickly and coherently; the extra
+						// noise is masked by the motion itself.
+						hysteresis = min(hysteresis, 0.95);
+					}
+
 					// Step at least the minimum representable value when darkening so
-					// convergence doesn't stall in low bit-depth formats.
+					// convergence doesn't stall in low bit-depth formats. Skipped for
+					// converged texels (it would force a visible oscillation).
 					const float c_threshold = 1.0 / 1024.0;
 					vec3 lerp_delta = (1.0 - hysteresis) * delta;
-					if (max_component(result.rgb) < max_component(previous)) {
+					if (convergence < 0.5 && max_component(result.rgb) < max_component(previous)) {
 						lerp_delta = min(max(vec3(c_threshold), abs(lerp_delta)), abs(delta)) * sign(lerp_delta);
 					}
-					result = vec4(previous + lerp_delta, 1.0);
+					// Alpha 0 is reserved as the cleared marker.
+					result = vec4(previous + lerp_delta, clamp(change_ema + 0.5, 1.0 / 255.0, 1.0));
 #else
+					if (probe_in_motion) {
+						hysteresis = min(hysteresis, 0.9);
+					}
 					result = vec4(mix(result.rg, previous.rg, hysteresis), 0.0, 1.0);
 #endif
 
@@ -204,6 +350,21 @@ void main() {
 	// Wait for all interior texels of this probe, then fill the border.
 	memoryBarrierImage();
 	barrier();
+
+#ifdef MODE_IRRADIANCE
+	if (gl_LocalInvocationIndex == 0) {
+		float inv_texels = 1.0 / float(OCT_INTERIOR_TEXELS * OCT_INTERIOR_TEXELS);
+		float mean_gap = (float(s_gap_sum_fp) / PROBE_STAT_FP_SCALE) * inv_texels;
+		float mean_brightness = (float(s_brightness_sum_fp) / PROBE_STAT_FP_SCALE) * inv_texels;
+		ivec3 stat_coords = ddgi_probe_texel_coords(probe_index, ddgi.data);
+		// Temporal smoothing: low-amplitude ringing of the fast feedback loop
+		// is coherent but alternating, so a short EMA suppresses it while a
+		// genuine pending change persists through it.
+		float previous_gap = imageLoad(probe_change, stat_coords).r;
+		mean_gap = mix(previous_gap, mean_gap, 0.35);
+		imageStore(probe_change, stat_coords, vec4(mean_gap, mean_brightness, 0.0, 0.0));
+	}
+#endif
 
 	if (is_border_texel) {
 		update_border_texel(thread_coords, group_thread, group_id);
