@@ -337,6 +337,12 @@ vec4 ddgi_fetch_probe_data(ivec3 coords) {
 vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 direction, DDGIVolumeData volume) {
 	vec3 irradiance = vec3(0.0);
 	float accumulated_weights = 0.0;
+	// Fallback accumulator with the RTXGI 5% visibility floor; only used when
+	// no probe passes the strict visibility test. Keeping the strict sum free
+	// of the floor prevents bright occluded probes (e.g. sky-lit probes behind
+	// a wall) from leaking into fully enclosed interiors.
+	vec3 fallback_irradiance = vec3(0.0);
+	float fallback_weights = 0.0;
 
 	vec3 biased_world_position = world_position + surface_bias;
 
@@ -382,11 +388,15 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 
 		// Chebyshev visibility (the DDGI occlusion fix): use mean/mean-squared
 		// distances stored in the probe to statistically reject occluded probes.
+		// Note: unlike the RTXGI reference, the mean is used unscaled (RTXGI
+		// multiplies it by 2, which lets any sample within twice the occluder
+		// distance pass as visible and leaks sky-lit probes through walls into
+		// enclosed interiors), and the variance is the proper E[d^2] - E[d]^2.
 		vec2 octant_coords = ddgi_oct_coord(-biased_pos_to_probe);
 		vec3 probe_uv = ddgi_probe_uv(adjacent_index, octant_coords, DDGI_DISTANCE_OCT_SIZE, volume);
-		vec2 filtered_distance = 2.0 * ddgi_fetch_distance(probe_uv);
+		vec2 filtered_distance = ddgi_fetch_distance(probe_uv);
 
-		float variance = abs((filtered_distance.x * filtered_distance.x) - filtered_distance.y);
+		float variance = abs(filtered_distance.y - (filtered_distance.x * filtered_distance.x));
 
 		float chebyshev_weight = 1.0;
 		if (biased_pos_to_probe_dist > filtered_distance.x) {
@@ -395,16 +405,20 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 			chebyshev_weight = max(chebyshev_weight * chebyshev_weight * chebyshev_weight, 0.0);
 		}
 
-		weight *= max(0.05, chebyshev_weight);
-		weight = max(0.000001, weight);
+		float strict_weight = max(0.000001, weight * chebyshev_weight);
+		float fallback_weight = max(0.000001, weight * max(0.05, chebyshev_weight));
 
 		// Crush tiny weights (logarithmic perception).
 		const float crush_threshold = 0.2;
-		if (weight < crush_threshold) {
-			weight *= (weight * weight) * (1.0 / (crush_threshold * crush_threshold));
+		if (strict_weight < crush_threshold) {
+			strict_weight *= (strict_weight * strict_weight) * (1.0 / (crush_threshold * crush_threshold));
+		}
+		if (fallback_weight < crush_threshold) {
+			fallback_weight *= (fallback_weight * fallback_weight) * (1.0 / (crush_threshold * crush_threshold));
 		}
 
-		weight *= trilinear_weight;
+		strict_weight *= trilinear_weight;
+		fallback_weight *= trilinear_weight;
 
 		octant_coords = ddgi_oct_coord(direction);
 		probe_uv = ddgi_probe_uv(adjacent_index, octant_coords, DDGI_IRRADIANCE_OCT_SIZE, volume);
@@ -413,8 +427,23 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 		// Decode the tone curve, leaving a gamma = 2 curve to approximate sRGB blending.
 		probe_irradiance = pow(probe_irradiance, vec3(volume.irradiance_gamma * 0.5));
 
-		irradiance += weight * probe_irradiance;
-		accumulated_weights += weight;
+		irradiance += strict_weight * probe_irradiance;
+		accumulated_weights += strict_weight;
+		fallback_irradiance += fallback_weight * probe_irradiance;
+		fallback_weights += fallback_weight;
+	}
+
+	// Blend towards the floored fallback as the strict weights vanish, so the
+	// no-visibility case stays stable without leaking through occluders.
+	const float fallback_threshold = 0.01;
+	if (accumulated_weights < fallback_threshold && fallback_weights > 0.0) {
+		float t = accumulated_weights / fallback_threshold;
+		vec3 fallback_avg = fallback_irradiance / fallback_weights;
+		vec3 strict_avg = (accumulated_weights > 0.0) ? (irradiance / accumulated_weights) : fallback_avg;
+		vec3 blended = mix(fallback_avg, strict_avg, t);
+		blended *= blended;
+		blended *= DDGI_2PI;
+		return blended;
 	}
 
 	if (accumulated_weights == 0.0) {

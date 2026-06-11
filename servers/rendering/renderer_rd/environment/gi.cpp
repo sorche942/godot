@@ -4515,6 +4515,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 
 	/* Trace probe rays. */
 
+
 	RID sky_2d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
 	RID sky_array = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
 	if (p_sky != nullptr && p_sky->radiance.is_valid()) {
