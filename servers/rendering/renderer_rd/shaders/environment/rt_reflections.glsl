@@ -245,8 +245,10 @@ void main() {
 
 	vec4 normal_roughness = texelFetch(sampler2D(normal_roughness_buffer, linear_sampler), src_pos, 0);
 	vec3 normal = normal_roughness.xyz * 2.0 - 1.0;
-	if (length(normal) < 0.5) {
-		// Invalid normal; no geometry here.
+	if (length(normal) < 0.1) {
+		// No geometry here. Note: valid normals can be well below unit length,
+		// since the buffer stores Kaplanyan best-fit normals (the length is
+		// the lattice scale, only the direction matters).
 		return;
 	}
 	normal = normalize(normal);
@@ -279,6 +281,43 @@ void main() {
 	} else {
 		vec3 cam_origin = (scene_data.cam_transform * vec4(scene_data.eye_offset[params.view_index].xyz, 1.0)).xyz;
 		view_dir = normalize(world_position - cam_origin);
+	}
+
+	// The G-buffer stores normals in 8 bits per axis; reflect() doubles the
+	// quantization error and mirror reflections on curved surfaces show it as
+	// banding. Refine the normal with a short primary re-trace: the RT vertex
+	// stream holds full precision smooth normals. The refined normal is only
+	// adopted when it agrees with the G-buffer one within quantization
+	// tolerance, so normal mapped detail is preserved.
+	{
+		vec3 retrace_origin = world_position - view_dir * 0.5;
+		payload.hit_t = 1e27;
+		traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, retrace_origin, 0.3, view_dir, 0.7, 0);
+		if (payload.hit_t > 0.0 && payload.hit_t < 1e27) {
+			InstanceData re_instance = instances.data[payload.instance_index];
+			TrianglePositions re_tri = TrianglePositions(re_instance.vertex_buffer_address);
+			uint re_base = payload.primitive_index * 24;
+			vec3 re_bary = vec3(1.0 - payload.barycentrics.x - payload.barycentrics.y, payload.barycentrics.x, payload.barycentrics.y);
+			vec3 rn0 = vec3(re_tri.data[re_base + 5], re_tri.data[re_base + 6], re_tri.data[re_base + 7]);
+			vec3 rn1 = vec3(re_tri.data[re_base + 13], re_tri.data[re_base + 14], re_tri.data[re_base + 15]);
+			vec3 rn2 = vec3(re_tri.data[re_base + 21], re_tri.data[re_base + 22], re_tri.data[re_base + 23]);
+			mat3 re_rot = mat3(
+					vec3(re_instance.xform[0].x, re_instance.xform[1].x, re_instance.xform[2].x),
+					vec3(re_instance.xform[0].y, re_instance.xform[1].y, re_instance.xform[2].y),
+					vec3(re_instance.xform[0].z, re_instance.xform[1].z, re_instance.xform[2].z));
+			vec3 precise_normal = normalize(re_rot * (rn0 * re_bary.x + rn1 * re_bary.y + rn2 * re_bary.z));
+			if (dot(precise_normal, view_dir) > 0.0) {
+				precise_normal = -precise_normal;
+			}
+			if (dot(precise_normal, world_normal) > 0.999) {
+				world_normal = precise_normal;
+			}
+			// The exact hit point is far more precise than the position
+			// reconstructed from the depth buffer; reflection rays starting
+			// from the reconstructed point can re-enter curved surfaces
+			// (visible as dark speckles).
+			world_position = retrace_origin + view_dir * payload.hit_t;
+		}
 	}
 
 	vec3 reflect_dir = normalize(reflect(view_dir, world_normal));
