@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -4880,6 +4881,125 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	pending_geometry_instances = nullptr;
 	pending_lights = nullptr;
 	pending_directional_lights = nullptr;
+
+	debug_dump_probes();
+}
+
+// Debug aid: GODOT_DDGI_DUMP_POS="x,y,z" prints (every 60 frames) the state of
+// the 8 probes around that world position, plus global active/inactive counts.
+void GI::DDGI::debug_dump_probes() {
+	static String dump_pos_env = OS::get_singleton()->get_environment("GODOT_DDGI_DUMP_POS");
+	if (dump_pos_env.is_empty() || (frame % 60) != 0) {
+		return;
+	}
+	Vector<String> parts = dump_pos_env.split(",");
+	if (parts.size() != 3) {
+		return;
+	}
+	Vector3 world_pos(parts[0].to_float(), parts[1].to_float(), parts[2].to_float());
+
+	// Mirrors ddgi_base_probe_coords (origin is always zero).
+	Vector3 rel = world_pos - Vector3(scroll_offsets) * probe_spacing + probe_spacing * Vector3(probe_counts - Vector3i(1, 1, 1)) * 0.5;
+	Vector3i base = Vector3i(rel / probe_spacing).clamp(Vector3i(), probe_counts - Vector3i(1, 1, 1));
+
+	uint32_t active = 0;
+	uint32_t inactive = 0;
+	LocalVector<Vector<uint8_t>> layers;
+	layers.resize(probe_counts.y);
+	for (int l = 0; l < probe_counts.y; l++) {
+		layers[l] = RD::get_singleton()->texture_get_data(probe_data_tex, l);
+		const uint16_t *px = (const uint16_t *)layers[l].ptr();
+		for (int i = 0; i < probe_counts.x * probe_counts.z; i++) {
+			float w = Math::half_to_float(px[i * 4 + 3]);
+			if (w >= 0.999f) {
+				inactive++;
+			} else {
+				active++;
+			}
+		}
+	}
+	// Scan the irradiance/distance atlases for poisoned texels (NaN/inf/negative):
+	// the hysteresis blend mix(prev, new, h) makes any NaN permanent.
+	uint32_t irr_nan = 0, irr_neg = 0, dist_nan = 0, dist_neg = 0;
+	for (int l = 0; l < probe_counts.y; l++) {
+		Vector<uint8_t> irr = RD::get_singleton()->texture_get_data(irradiance_tex, l);
+		const uint16_t *ip = (const uint16_t *)irr.ptr();
+		for (int i = 0; i < irr.size() / 8; i++) {
+			for (int c = 0; c < 3; c++) {
+				float v = Math::half_to_float(ip[i * 4 + c]);
+				if (!Math::is_finite(v)) {
+					irr_nan++;
+				} else if (v < 0.0f) {
+					irr_neg++;
+				}
+			}
+		}
+		Vector<uint8_t> dist = RD::get_singleton()->texture_get_data(distance_tex, l);
+		const uint16_t *dp = (const uint16_t *)dist.ptr();
+		for (int i = 0; i < dist.size() / 4; i++) {
+			for (int c = 0; c < 2; c++) {
+				float v = Math::half_to_float(dp[i * 2 + c]);
+				if (!Math::is_finite(v)) {
+					dist_nan++;
+				} else if (v < 0.0f) {
+					dist_neg++;
+				}
+			}
+		}
+	}
+	print_line(vformat("DDGI DUMP frame %d: %d active, %d inactive; irr nan %d neg %d; dist nan %d neg %d; cell base %s for %s; scroll %s", frame, active, inactive, irr_nan, irr_neg, dist_nan, dist_neg, base, world_pos, scroll_offsets));
+	// All probes with non-zero relocation offsets (storage slot -> spatial -> world).
+	{
+		int per_plane = probe_counts.x * probe_counts.z;
+		int shown = 0;
+		for (int l = 0; l < probe_counts.y && shown < 24; l++) {
+			const uint16_t *px = (const uint16_t *)layers[l].ptr();
+			for (int i = 0; i < per_plane && shown < 24; i++) {
+				Vector3 off(Math::half_to_float(px[i * 4 + 0]), Math::half_to_float(px[i * 4 + 1]), Math::half_to_float(px[i * 4 + 2]));
+				if (off.length() < 0.01f) {
+					continue;
+				}
+				Vector3i storage(i % probe_counts.x, l, i / probe_counts.x);
+				Vector3i spatial(
+						((storage.x - scroll_offsets.x) % probe_counts.x + probe_counts.x) % probe_counts.x,
+						((storage.y - scroll_offsets.y) % probe_counts.y + probe_counts.y) % probe_counts.y,
+						((storage.z - scroll_offsets.z) % probe_counts.z + probe_counts.z) % probe_counts.z);
+				Vector3 w = Vector3(spatial) * probe_spacing - probe_spacing * Vector3(probe_counts - Vector3i(1, 1, 1)) * 0.5 + Vector3(scroll_offsets) * probe_spacing + off * probe_spacing;
+				print_line(vformat("  offset slot(x%d l%d z%d) spatial %s -> world %s off %s", storage.x, storage.y, storage.z, spatial, w, off));
+				shown++;
+			}
+		}
+	}
+	// ASCII activity map of each storage layer (row = z, col = x, '#' = active).
+	if (OS::get_singleton()->get_environment("GODOT_DDGI_DUMP_MAP") == "1") {
+		for (int l = 0; l < probe_counts.y; l++) {
+			const uint16_t *px = (const uint16_t *)layers[l].ptr();
+			String map;
+			for (int z = 0; z < probe_counts.z; z++) {
+				for (int x = 0; x < probe_counts.x; x++) {
+					map += Math::half_to_float(px[(x + z * probe_counts.x) * 4 + 3]) >= 0.999f ? "." : "#";
+				}
+				map += "\n";
+			}
+			print_line(vformat("layer %d (storage):\n%s", l, map));
+		}
+	}
+	for (int p = 0; p < 8; p++) {
+		Vector3i adj = (base + Vector3i(p & 1, (p >> 1) & 1, (p >> 2) & 1)).min(probe_counts - Vector3i(1, 1, 1));
+		// Mirrors ddgi_scrolling_probe_index + ddgi_probe_texel_coords.
+		Vector3i storage = Vector3i(
+				(((adj.x + scroll_offsets.x) % probe_counts.x) + probe_counts.x) % probe_counts.x,
+				(((adj.y + scroll_offsets.y) % probe_counts.y) + probe_counts.y) % probe_counts.y,
+				(((adj.z + scroll_offsets.z) % probe_counts.z) + probe_counts.z) % probe_counts.z);
+		const uint16_t *px = (const uint16_t *)layers[storage.y].ptr();
+		int texel = storage.x + storage.z * probe_counts.x;
+		float ox = Math::half_to_float(px[texel * 4 + 0]);
+		float oy = Math::half_to_float(px[texel * 4 + 1]);
+		float oz = Math::half_to_float(px[texel * 4 + 2]);
+		float state = Math::half_to_float(px[texel * 4 + 3]);
+		Vector3 probe_world = Vector3(adj) * probe_spacing - probe_spacing * Vector3(probe_counts - Vector3i(1, 1, 1)) * 0.5 + Vector3(scroll_offsets) * probe_spacing;
+		print_line(vformat("  probe %s world %s offset (%.2f, %.2f, %.2f) state %.3f%s", adj, probe_world, ox, oy, oz, state, state >= 0.999f ? " INACTIVE" : ""));
+	}
 }
 
 void GI::DDGI::free_data() {

@@ -117,14 +117,13 @@ void main() {
 
 #ifdef MODE_CLASSIFY
 	vec4 current = imageLoad(probe_data, output_coords);
+	bool was_inactive = current.w == DDGI_PROBE_STATE_INACTIVE;
 
 	int backface_count = 0;
-	float hit_distances[DDGI_NUM_FIXED_RAYS];
 
 	for (int ray_index = 0; ray_index < num_rays; ray_index++) {
 		ivec3 ray_coords = ddgi_ray_data_texel_coords(ray_index, probe_index, ddgi.data);
-		hit_distances[ray_index] = imageLoad(ray_data, ray_coords).w;
-		backface_count += int(hit_distances[ray_index] < 0.0);
+		backface_count += int(imageLoad(ray_data, ray_coords).w < 0.0);
 	}
 
 	// Too many backface hits: the probe is probably inside geometry.
@@ -134,9 +133,18 @@ void main() {
 	}
 
 	// Determine if there is geometry within this probe's voxel by comparing
-	// ray hit distances against the distances to the voxel planes.
-	for (int ray_index = 0; ray_index < num_rays; ray_index++) {
-		if (hit_distances[ray_index] < 0.0) {
+	// ray hit distances against the distances to the voxel planes. The 32
+	// fixed rays alone miss small geometry (and the miss pattern repeats with
+	// the grid, leaving holes of dead probes at regular intervals), so active
+	// probes scan their full rotating ray set: over a few frames it covers the
+	// sphere densely enough to catch anything that matters. Inactive probes
+	// only have fresh data for the fixed rays.
+	int scan_rays = was_inactive ? num_rays : ddgi.data.probe_ray_count;
+	bool geometry_in_voxel = false;
+	for (int ray_index = 0; ray_index < scan_rays; ray_index++) {
+		ivec3 ray_coords = ddgi_ray_data_texel_coords(ray_index, probe_index, ddgi.data);
+		float hit_distance = imageLoad(ray_data, ray_coords).w;
+		if (hit_distance < 0.0) {
 			continue;
 		}
 
@@ -151,14 +159,40 @@ void main() {
 
 		float max_distance = min(distances.x, min(distances.y, distances.z));
 
-		if (hit_distances[ray_index] <= max_distance) {
-			// Geometry is close enough to matter: keep the probe active.
-			imageStore(probe_data, output_coords, vec4(current.xyz, DDGI_PROBE_STATE_ACTIVE));
-			return;
+		if (hit_distance <= max_distance) {
+			geometry_in_voxel = true;
+			break;
 		}
 	}
 
-	imageStore(probe_data, output_coords, vec4(current.xyz, DDGI_PROBE_STATE_INACTIVE));
+	if (geometry_in_voxel) {
+		// Fade back in rather than snapping to active: borderline probes whose
+		// rotating rays only intermittently catch geometry would otherwise
+		// oscillate between states and modulate the sampled lighting.
+		imageStore(probe_data, output_coords, vec4(current.xyz, max(current.w - 0.25, DDGI_PROBE_STATE_ACTIVE)));
+		return;
+	}
+
+	// Probes inside a motion region wake up: something moved (or spawned) here
+	// and inactive probes' sparse fixed rays may never see it on their own.
+	if (ddgi.data.motion_region_count > 0) {
+		// Recover the probe's world position from its storage coordinates.
+		ivec3 storage_coords = ddgi_probe_coords(probe_index, ddgi.data);
+		ivec3 spatial_coords = ((storage_coords - ddgi.data.probe_scroll_offsets) % ddgi.data.probe_counts + ddgi.data.probe_counts) % ddgi.data.probe_counts;
+		vec3 probe_world = ddgi_probe_world_position_base(spatial_coords, ddgi.data) + current.xyz * ddgi.data.probe_spacing;
+		for (int r = 0; r < ddgi.data.motion_region_count; r++) {
+			if (all(greaterThanEqual(probe_world, ddgi.data.motion_region_min[r].xyz)) && all(lessThanEqual(probe_world, ddgi.data.motion_region_max[r].xyz))) {
+				imageStore(probe_data, output_coords, vec4(current.xyz, DDGI_PROBE_STATE_ACTIVE));
+				return;
+			}
+		}
+	}
+
+	// No geometry in sight: deactivate, but only after a streak of consecutive
+	// empty frames. Small objects are only caught by the rotating rays every
+	// few frames; instant deactivation would flicker them in and out.
+	float new_state = min(current.w + (1.0 / 16.0), DDGI_PROBE_STATE_INACTIVE);
+	imageStore(probe_data, output_coords, vec4(current.xyz, new_state));
 #endif // MODE_CLASSIFY
 
 #endif // !MODE_RESET

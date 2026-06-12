@@ -350,6 +350,13 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 	// a wall) from leaking into fully enclosed interiors.
 	vec3 fallback_irradiance = vec3(0.0);
 	float fallback_weights = 0.0;
+	// Last resort: stored irradiance of classification-inactive probes (stale
+	// but valid open-air data). Only used when every probe got skipped, which
+	// happens for small geometry floating in a dead (geometry-free) cell that
+	// classification hasn't caught up with; returning black there blacks out
+	// whole objects.
+	vec3 last_resort_irradiance = vec3(0.0);
+	float last_resort_weights = 0.0;
 
 	vec3 biased_world_position = world_position + surface_bias;
 
@@ -370,16 +377,32 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 		ivec3 probe_data_coords = ddgi_probe_texel_coords(adjacent_index, volume);
 		vec4 probe_data = ddgi_fetch_probe_data(probe_data_coords);
 
-		if (use_classification && probe_data.w == DDGI_PROBE_STATE_INACTIVE) {
-			continue;
-		}
-
 		vec3 adjacent_world_position = ddgi_probe_world_position_base(adjacent_coords, volume);
 		if (use_relocation) {
 			adjacent_world_position += probe_data.xyz * volume.probe_spacing;
 		}
 
-		vec3 world_pos_to_probe = normalize(adjacent_world_position - world_position);
+		vec3 pos_to_probe_unnormalized = adjacent_world_position - world_position;
+		float pos_to_probe_dist = length(pos_to_probe_unnormalized);
+		vec3 world_pos_to_probe = (pos_to_probe_dist > 0.0) ? (pos_to_probe_unnormalized / pos_to_probe_dist) : vec3(0.0);
+
+		// The classification state doubles as a miss-streak counter: 0 = active,
+		// 1 = fully inactive, in-between = fading out. Weigh the probe down
+		// smoothly so state transitions don't pop.
+		float probe_liveness = use_classification ? (1.0 - clamp(probe_data.w, 0.0, 1.0)) : 1.0;
+
+		if (probe_liveness <= 0.0) {
+			vec3 alpha_mix = mix(1.0 - alpha, alpha, vec3(adjacent_offset));
+			float inactive_trilinear = max(0.001, alpha_mix.x * alpha_mix.y * alpha_mix.z);
+			float inactive_wrap = (dot(world_pos_to_probe, direction) + 1.0) * 0.5;
+			float inactive_weight = inactive_trilinear * ((inactive_wrap * inactive_wrap) + 0.2);
+			vec2 inactive_octant = ddgi_oct_coord(direction);
+			vec3 inactive_uv = ddgi_probe_uv(adjacent_index, inactive_octant, DDGI_IRRADIANCE_OCT_SIZE, volume);
+			vec3 inactive_irradiance = max(ddgi_fetch_irradiance(inactive_uv), vec3(0.0));
+			last_resort_irradiance += inactive_weight * pow(inactive_irradiance, vec3(volume.irradiance_gamma * 0.5));
+			last_resort_weights += inactive_weight;
+			continue;
+		}
 		vec3 biased_pos_to_probe = adjacent_world_position - biased_world_position;
 		float biased_pos_to_probe_dist = length(biased_pos_to_probe);
 		biased_pos_to_probe = (biased_pos_to_probe_dist > 0.0) ? (biased_pos_to_probe / biased_pos_to_probe_dist) : vec3(0.0);
@@ -424,12 +447,12 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 			fallback_weight *= (fallback_weight * fallback_weight) * (1.0 / (crush_threshold * crush_threshold));
 		}
 
-		strict_weight *= trilinear_weight;
-		fallback_weight *= trilinear_weight;
+		strict_weight *= trilinear_weight * probe_liveness;
+		fallback_weight *= trilinear_weight * probe_liveness;
 
 		octant_coords = ddgi_oct_coord(direction);
 		probe_uv = ddgi_probe_uv(adjacent_index, octant_coords, DDGI_IRRADIANCE_OCT_SIZE, volume);
-		vec3 probe_irradiance = ddgi_fetch_irradiance(probe_uv);
+		vec3 probe_irradiance = max(ddgi_fetch_irradiance(probe_uv), vec3(0.0));
 
 		// Decode the tone curve, leaving a gamma = 2 curve to approximate sRGB blending.
 		probe_irradiance = pow(probe_irradiance, vec3(volume.irradiance_gamma * 0.5));
@@ -454,6 +477,12 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 	}
 
 	if (accumulated_weights == 0.0) {
+		if (last_resort_weights > 0.0) {
+			vec3 blended = last_resort_irradiance / last_resort_weights;
+			blended *= blended;
+			blended *= DDGI_2PI;
+			return blended;
+		}
 		return vec3(0.0);
 	}
 

@@ -935,6 +935,8 @@ public:
 
 		// Builds the TLAS and runs the trace/blend/relocation/classification passes.
 		void update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky);
+		// Prints probe states around GODOT_DDGI_DUMP_POS="x,y,z" (debug aid).
+		void debug_dump_probes();
 
 		uint32_t get_probe_count() const { return uint32_t(probe_counts.x * probe_counts.y * probe_counts.z); }
 		uint32_t get_probes_per_plane() const { return uint32_t(probe_counts.x * probe_counts.z); }
