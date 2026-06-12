@@ -59,6 +59,9 @@ struct InstanceData {
 	vec4 albedo;
 	vec4 emission;
 	vec4 uv_scale_offset; // Material uv1 scale.xy + offset.xy.
+	// x = metallic, y = roughness, z/w = packed texture slots for the metallic
+	// and roughness maps (index * 4 + channel, or -1).
+	vec4 metallic_roughness;
 };
 
 layout(set = 0, binding = 2, std430) restrict readonly buffer Instances {
@@ -314,20 +317,47 @@ void main() {
 		irradiance *= volume_weight;
 	}
 
-	// Perfectly diffuse reflectors don't exist; clamp albedo to limit energy gain.
-	vec3 albedo = instance.albedo.rgb;
-	if (instance.albedo_tex_index != 0xFFFFFFFF) {
+	vec2 uv = vec2(0.0);
+	bool has_uv = false;
+	if (instance.albedo_tex_index != 0xFFFFFFFF || instance.metallic_roughness.z >= 0.0 || instance.metallic_roughness.w >= 0.0) {
 		vec2 uv0 = vec2(tri.data[base + 3], tri.data[base + 4]);
 		vec2 uv1 = vec2(tri.data[base + 11], tri.data[base + 12]);
 		vec2 uv2 = vec2(tri.data[base + 19], tri.data[base + 20]);
-		vec2 uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+		uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
 		uv = uv * instance.uv_scale_offset.xy + instance.uv_scale_offset.zw;
-		// Probe rays are heavily blurred by the probe integration; a high mip is plenty.
-		albedo *= textureLod(sampler2D(albedo_textures[nonuniformEXT(instance.albedo_tex_index)], material_sampler), uv, 4.0).rgb;
+		has_uv = true;
 	}
+
+	// Probe rays are heavily blurred by the probe integration; a high mip is plenty.
+	const float tex_lod = 4.0;
+	vec3 albedo = instance.albedo.rgb;
+	if (instance.albedo_tex_index != 0xFFFFFFFF) {
+		albedo *= textureLod(sampler2D(albedo_textures[nonuniformEXT(instance.albedo_tex_index)], material_sampler), uv, tex_lod).rgb;
+	}
+	// Perfectly diffuse reflectors don't exist; clamp albedo to limit energy gain.
 	albedo = min(albedo, vec3(0.9));
+
+	float metallic = instance.metallic_roughness.x;
+	float surface_roughness = instance.metallic_roughness.y;
+	if (has_uv && instance.metallic_roughness.z >= 0.0) {
+		int packed = int(instance.metallic_roughness.z);
+		metallic *= textureLod(sampler2D(albedo_textures[nonuniformEXT(packed >> 2)], material_sampler), uv, tex_lod)[packed & 3];
+	}
+	if (has_uv && instance.metallic_roughness.w >= 0.0) {
+		int packed = int(instance.metallic_roughness.w);
+		surface_roughness *= textureLod(sampler2D(albedo_textures[nonuniformEXT(packed >> 2)], material_sampler), uv, tex_lod)[packed & 3];
+	}
+
+	// For probe bounce purposes a metal behaves like a tinted diffuse
+	// reflector of equivalent energy: kd + f0 = albedo*(1-m) + mix(0.04,
+	// albedo, m) ~= albedo. Directional specular detail is invisible after the
+	// probe integration, and sampling it per ray would re-introduce estimate
+	// noise; the directional metallic workflow lives in the reflections pass.
+	float dielectric_boost = 0.04 * (1.0 - metallic);
+	vec3 bounce_color = min(albedo + vec3(dielectric_boost), vec3(0.9));
+
 	// emission.a is zero for emitters handled by the virtual lights above.
-	vec3 radiance = instance.emission.rgb * instance.emission.a + (albedo / DDGI_PI) * (direct + irradiance);
+	vec3 radiance = instance.emission.rgb * instance.emission.a + (bounce_color / DDGI_PI) * (direct + irradiance);
 
 	imageStore(ray_data, output_coords, vec4(radiance, hit_t));
 }

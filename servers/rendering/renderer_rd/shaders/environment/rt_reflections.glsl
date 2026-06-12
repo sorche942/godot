@@ -61,6 +61,9 @@ struct InstanceData {
 	vec4 albedo;
 	vec4 emission;
 	vec4 uv_scale_offset; // Material uv1 scale.xy + offset.xy.
+	// x = metallic, y = roughness, z/w = packed texture slots for the metallic
+	// and roughness maps (index * 4 + channel, or -1).
+	vec4 metallic_roughness;
 };
 
 layout(set = 0, binding = 2, std430) restrict readonly buffer Instances {
@@ -144,8 +147,11 @@ bool trace_shadow_ray(vec3 origin, vec3 direction, float max_distance) {
 	return payload.hit_t > 0.0;
 }
 
-vec3 evaluate_direct_light(vec3 position, vec3 normal, uint shaded_instance) {
+vec3 evaluate_direct_light(vec3 position, vec3 normal, uint shaded_instance, vec3 view_direction, float spec_roughness, out vec3 r_specular) {
 	vec3 light_accum = vec3(0.0);
+	r_specular = vec3(0.0);
+	// Blinn-Phong-style lobe; enough for recognizable highlights in reflections.
+	float shininess = clamp(2.0 / max(spec_roughness * spec_roughness, 0.005) - 2.0, 4.0, 1024.0);
 
 	for (int i = 0; i < ddgi.data.light_count; i++) {
 		vec3 direction;
@@ -210,7 +216,12 @@ vec3 evaluate_direct_light(vec3 position, vec3 normal, uint shaded_instance) {
 			}
 		}
 
-		light_accum += lights.data[i].color * lights.data[i].energy * attenuation;
+		vec3 light_value = lights.data[i].color * lights.data[i].energy * attenuation;
+		light_accum += light_value;
+
+		vec3 half_vector = normalize(direction - view_direction);
+		float n_dot_h = max(0.0, dot(normal, half_vector));
+		r_specular += light_value * pow(n_dot_h, shininess) * ((shininess + 8.0) / (8.0 * DDGI_PI));
 	}
 
 	return light_accum;
@@ -372,7 +383,33 @@ void main() {
 
 		vec3 hit_position = origin + reflect_dir * hit_t;
 
-		vec3 direct = evaluate_direct_light(hit_position, hit_normal, payload.instance_index);
+		// Material properties at the hit, including maps.
+		vec2 uv = vec2(0.0);
+		bool has_uv = false;
+		if (instance.albedo_tex_index != 0xFFFFFFFF || instance.metallic_roughness.z >= 0.0 || instance.metallic_roughness.w >= 0.0) {
+			vec2 uv0 = vec2(tri.data[base + 3], tri.data[base + 4]);
+			vec2 uv1 = vec2(tri.data[base + 11], tri.data[base + 12]);
+			vec2 uv2 = vec2(tri.data[base + 19], tri.data[base + 20]);
+			uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+			uv = uv * instance.uv_scale_offset.xy + instance.uv_scale_offset.zw;
+			has_uv = true;
+		}
+		// Crude ray-cone style mip selection: sharper up close, blurrier far away.
+		float tex_lod = clamp(log2(max(hit_t, 0.01)) + 1.0, 0.0, 6.0);
+
+		float metallic = instance.metallic_roughness.x;
+		float hit_roughness = instance.metallic_roughness.y;
+		if (has_uv && instance.metallic_roughness.z >= 0.0) {
+			int packed = int(instance.metallic_roughness.z);
+			metallic *= textureLod(sampler2D(albedo_textures[nonuniformEXT(packed >> 2)], material_sampler), uv, tex_lod)[packed & 3];
+		}
+		if (has_uv && instance.metallic_roughness.w >= 0.0) {
+			int packed = int(instance.metallic_roughness.w);
+			hit_roughness *= textureLod(sampler2D(albedo_textures[nonuniformEXT(packed >> 2)], material_sampler), uv, tex_lod)[packed & 3];
+		}
+
+		vec3 direct_specular;
+		vec3 direct = evaluate_direct_light(hit_position, hit_normal, payload.instance_index, reflect_dir, hit_roughness, direct_specular);
 
 		vec3 irradiance = vec3(0.0);
 		float volume_weight = ddgi_volume_blend_weight(hit_position, ddgi.data);
@@ -384,17 +421,31 @@ void main() {
 
 		vec3 albedo = instance.albedo.rgb;
 		if (instance.albedo_tex_index != 0xFFFFFFFF) {
-			vec2 uv0 = vec2(tri.data[base + 3], tri.data[base + 4]);
-			vec2 uv1 = vec2(tri.data[base + 11], tri.data[base + 12]);
-			vec2 uv2 = vec2(tri.data[base + 19], tri.data[base + 20]);
-			vec2 uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
-			uv = uv * instance.uv_scale_offset.xy + instance.uv_scale_offset.zw;
-			// Crude ray-cone style mip selection: sharper up close, blurrier far away.
-			float lod = clamp(log2(max(hit_t, 0.01)) + 1.0, 0.0, 6.0);
-			albedo *= textureLod(sampler2D(albedo_textures[nonuniformEXT(instance.albedo_tex_index)], material_sampler), uv, lod).rgb;
+			albedo *= textureLod(sampler2D(albedo_textures[nonuniformEXT(instance.albedo_tex_index)], material_sampler), uv, tex_lod).rgb;
 		}
 		albedo = min(albedo, vec3(0.9));
-		radiance = instance.emission.rgb + (albedo / DDGI_PI) * (direct + irradiance);
+
+		// Metallic workflow: metals have no diffuse and a tinted specular response.
+		vec3 diffuse_color = albedo * (1.0 - metallic);
+		vec3 f0 = mix(vec3(0.04), albedo, metallic);
+
+		// Environment specular from the probe field along this hit's own
+		// reflection direction (no recursion); rougher surfaces fit the blurry
+		// probe data naturally, smooth ones at least pick up tinted ambience.
+		vec3 specular_env = vec3(0.0);
+		{
+			vec3 hit_reflect = normalize(reflect(reflect_dir, hit_normal));
+			float spec_volume_weight = ddgi_volume_blend_weight(hit_position, ddgi.data);
+			if (spec_volume_weight > 0.0) {
+				vec3 spec_bias = ddgi_surface_bias(hit_normal, reflect_dir, ddgi.data);
+				specular_env = ddgi_sample_irradiance(hit_position, spec_bias, hit_reflect, ddgi.data);
+				specular_env *= spec_volume_weight * ddgi.data.energy / DDGI_2PI;
+			}
+		}
+
+		radiance = instance.emission.rgb +
+				(diffuse_color / DDGI_PI) * (direct + irradiance) +
+				f0 * (specular_env + direct_specular);
 	}
 
 	// Fade towards the existing probe based glossy result as roughness

@@ -834,6 +834,9 @@ public:
 			float albedo[4];
 			float emission[4];
 			float uv_scale_offset[4]; // Material uv1 scale.xy + offset.xy.
+			// x = metallic, y = roughness, z/w = packed texture slots for the
+			// metallic and roughness maps (index * 4 + channel, or -1).
+			float metallic_roughness[4];
 		};
 
 		enum {

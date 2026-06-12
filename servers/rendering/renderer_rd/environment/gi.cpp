@@ -4237,6 +4237,11 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	static const StringName albedo_texture_param_name = "texture_albedo";
 	static const StringName uv1_scale_param_name = "uv1_scale";
 	static const StringName uv1_offset_param_name = "uv1_offset";
+	static const StringName metallic_param_name = "metallic";
+	static const StringName roughness_param_name = "roughness";
+	static const StringName metallic_texture_param_name = "texture_metallic";
+	static const StringName roughness_texture_param_name = "texture_roughness";
+	static const StringName metallic_channel_param_name = "metallic_texture_channel";
 
 	HashMap<RID, uint32_t> albedo_texture_indices;
 
@@ -4360,6 +4365,10 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				uint32_t albedo_tex_index = 0xFFFFFFFF;
 				Vector3 uv1_scale(1, 1, 1);
 				Vector3 uv1_offset(0, 0, 0);
+				float metallic = 0.0f;
+				float surface_roughness = 1.0f;
+				float metallic_tex_packed = -1.0f;
+				float roughness_tex_packed = -1.0f;
 
 				RID material = inst->data->material_override;
 				if (material.is_null() && (int)s < inst->data->surface_materials.size()) {
@@ -4391,19 +4400,64 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 						uv1_offset = uv1_offset_v;
 					}
 
-					RID albedo_tex = material_storage->material_get_param(material, albedo_texture_param_name);
-					if (albedo_tex.is_valid()) {
-						HashMap<RID, uint32_t>::Iterator E = albedo_texture_indices.find(albedo_tex);
+					auto table_index_for = [&](const StringName &p_param, bool p_srgb) -> int32_t {
+						RID tex = material_storage->material_get_param(material, p_param);
+						if (tex.is_null()) {
+							return -1;
+						}
+						HashMap<RID, uint32_t>::Iterator E = albedo_texture_indices.find(tex);
 						if (E) {
-							albedo_tex_index = E->value;
-						} else if (albedo_texture_table.size() < MAX_ALBEDO_TEXTURES) {
-							RID rd_tex = texture_storage->texture_get_rd_texture(albedo_tex, true);
-							if (rd_tex.is_valid()) {
-								albedo_tex_index = albedo_texture_table.size();
-								albedo_texture_table.push_back(rd_tex);
-								albedo_texture_indices.insert(albedo_tex, albedo_tex_index);
+							return int32_t(E->value);
+						}
+						if (albedo_texture_table.size() >= MAX_ALBEDO_TEXTURES) {
+							return -1;
+						}
+						RID rd_tex = texture_storage->texture_get_rd_texture(tex, p_srgb);
+						if (rd_tex.is_null()) {
+							return -1;
+						}
+						uint32_t index = albedo_texture_table.size();
+						albedo_texture_table.push_back(rd_tex);
+						albedo_texture_indices.insert(tex, index);
+						return int32_t(index);
+					};
+
+					int32_t albedo_idx = table_index_for(albedo_texture_param_name, true);
+					if (albedo_idx >= 0) {
+						albedo_tex_index = uint32_t(albedo_idx);
+					}
+
+					Variant metallic_v = material_storage->material_get_param(material, metallic_param_name);
+					if (metallic_v.get_type() == Variant::FLOAT) {
+						metallic = metallic_v;
+					}
+					Variant roughness_v = material_storage->material_get_param(material, roughness_param_name);
+					if (roughness_v.get_type() == Variant::FLOAT) {
+						surface_roughness = roughness_v;
+					}
+
+					int32_t metallic_idx = table_index_for(metallic_texture_param_name, false);
+					if (metallic_idx >= 0) {
+						// The sampled channel comes from the material's channel mask.
+						int32_t channel = 0;
+						Variant channel_v = material_storage->material_get_param(material, metallic_channel_param_name);
+						if (channel_v.get_type() == Variant::PLANE) {
+							Plane mask = channel_v;
+							Vector4 m(mask.normal.x, mask.normal.y, mask.normal.z, mask.d);
+							for (int c = 1; c < 4; c++) {
+								if (m[c] > m[channel]) {
+									channel = c;
+								}
 							}
 						}
+						metallic_tex_packed = float(metallic_idx * 4 + channel);
+					}
+
+					int32_t roughness_idx = table_index_for(roughness_texture_param_name, false);
+					if (roughness_idx >= 0) {
+						// The roughness channel is baked into the material shader and
+						// not queryable; the red channel is the default.
+						roughness_tex_packed = float(roughness_idx * 4 + 0);
 					}
 				}
 
@@ -4463,6 +4517,10 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				data.uv_scale_offset[1] = uv1_scale.y;
 				data.uv_scale_offset[2] = uv1_offset.x;
 				data.uv_scale_offset[3] = uv1_offset.y;
+				data.metallic_roughness[0] = metallic;
+				data.metallic_roughness[1] = surface_roughness;
+				data.metallic_roughness[2] = metallic_tex_packed;
+				data.metallic_roughness[3] = roughness_tex_packed;
 				instance_data.push_back(data);
 				}
 			}
