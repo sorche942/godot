@@ -94,6 +94,17 @@ def get_flags():
 
 
 def configure(env: "SConsEnvironment"):
+    # NVIDIA DLSS (NGX) SDK; enabled when the SDK is present.
+    import os.path as _osp
+
+    dlss_path = os.environ.get("GODOT_DLSS_SDK", "../DLSS")
+    if _osp.isdir(_osp.join(dlss_path, "include")) and _osp.isfile(_osp.join(dlss_path, "lib/Linux_x86_64/libnvsdk_ngx.a")):
+        print("Enabling DLSS support (SDK found at %s)." % dlss_path)
+        env.Append(CPPDEFINES=["DLSS_ENABLED"])
+        env.Append(CPPPATH=[_osp.abspath(_osp.join(dlss_path, "include"))])
+        env.Append(LIBPATH=[_osp.abspath(_osp.join(dlss_path, "lib/Linux_x86_64"))])
+        env.Append(LIBS=["nvsdk_ngx"])
+
     # Validate arch.
     supported_arches = ["x86_32", "x86_64", "arm32", "arm64", "rv64", "ppc64", "loongarch64"]
     validate_arch(env["arch"], get_name(), supported_arches)

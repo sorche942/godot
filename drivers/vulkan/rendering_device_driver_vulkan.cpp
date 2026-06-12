@@ -578,6 +578,12 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_EXT_ASTC_DECODE_MODE_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, false);
+#ifdef DLSS_ENABLED
+	// Required by the NVIDIA NGX runtime (DLSS); only present on NVIDIA.
+	_register_requested_device_extension(VK_NVX_BINARY_IMPORT_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, false);
+#endif
 	_register_requested_device_extension(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME, false);
@@ -3428,6 +3434,11 @@ void RenderingDeviceDriverVulkan::command_pool_free(CommandPoolID p_cmd_pool) {
 }
 
 // ----- BUFFER -----
+
+uint64_t RenderingDeviceDriverVulkan::command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) {
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)(p_cmd_buffer.id);
+	return (uint64_t)command_buffer->vk_command_buffer;
+}
 
 RDD::CommandBufferID RenderingDeviceDriverVulkan::command_buffer_create(CommandPoolID p_cmd_pool) {
 	DEV_ASSERT(p_cmd_pool);

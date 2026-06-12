@@ -816,6 +816,10 @@ public:
 
 	typedef void (*DriverCallback)(RenderingDeviceDriver *p_driver, CommandBufferID p_command_buffer, void *p_userdata);
 
+	// Native (API-level) handle of a command buffer, for external SDKs invoked
+	// from driver callbacks. Returns 0 when the driver doesn't support it.
+	virtual uint64_t command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) { return 0; }
+
 	/*****************/
 	/**** QUERIES ****/
 	/*****************/
