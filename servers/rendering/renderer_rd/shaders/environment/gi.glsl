@@ -119,15 +119,14 @@ layout(r8ui, set = 0, binding = 19) uniform restrict readonly uimage2D vrs_buffe
 /* DDGI */
 
 // DDGI resources live in their own set, bound per frame.
-// Bound as storage images: the probe atlases are written as storage images by
-// the DDGI update passes and read by the raytracing pass; keeping a single
-// usage type across the frame avoids layout transitions. Bilinear filtering is
-// done manually in ddgi_inc.glsl.
-layout(rgba16f, set = 1, binding = 0) uniform restrict readonly image2DArray ddgi_irradiance_image;
-layout(rg16f, set = 1, binding = 1) uniform restrict readonly image2DArray ddgi_distance_image;
-layout(rgba16f, set = 1, binding = 2) uniform restrict readonly image2DArray ddgi_probe_data_image;
+// Bound as sampled textures: the DDGI update has fully finished by the time
+// this pass runs, and hardware bilinear filtering quarters the fetch count of
+// the manual filtering needed in passes that read the atlases mid-update.
+layout(set = 1, binding = 0) uniform texture2DArray ddgi_irradiance_texture;
+layout(set = 1, binding = 1) uniform texture2DArray ddgi_distance_texture;
+layout(set = 1, binding = 2) uniform texture2DArray ddgi_probe_data_texture;
 
-#define DDGI_INC_SAMPLING_IMAGE
+#define DDGI_INC_SAMPLING
 #include "ddgi_inc.glsl"
 
 layout(set = 1, binding = 3, std140) uniform DDGIVolume {
@@ -532,7 +531,20 @@ void ddgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, ou
 	// probes/SSR (alpha ramps down so they take over).
 	float glossy_blend = clamp((roughness - 0.2) * 1.25, 0.0, 1.0);
 	if (glossy_blend > 0.0) {
-		vec3 glossy_irradiance = ddgi_sample_irradiance(world_position, surface_bias, reflection, ddgi.data);
+		// The RT reflections pass fully overwrites the buffer below its fade
+		// start: computing probe glossy there is wasted work.
+		if ((ddgi.data.flags & DDGI_FLAG_RT_REFLECTIONS) != 0 && roughness < ddgi.data.rt_reflections_fade_start) {
+			return;
+		}
+		// Very rough specular lobes are nearly hemispherical, so the already
+		// sampled diffuse irradiance approximates them; blending into it saves
+		// the second field sample on rough materials (most of a typical frame).
+		float approx_weight = smoothstep(0.6, 0.75, roughness);
+		vec3 glossy_irradiance = irradiance;
+		if (approx_weight < 1.0) {
+			vec3 sampled = ddgi_sample_irradiance(world_position, surface_bias, reflection, ddgi.data);
+			glossy_irradiance = mix(sampled, irradiance, approx_weight);
+		}
 		vec3 glossy = glossy_irradiance * (ddgi.data.energy / DDGI_2PI);
 		reflection_light = vec4(glossy, blend * glossy_blend);
 	}

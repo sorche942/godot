@@ -771,6 +771,7 @@ public:
 		enum {
 			FLAG_PROBE_RELOCATION = (1 << 0),
 			FLAG_PROBE_CLASSIFICATION = (1 << 1),
+			FLAG_RT_REFLECTIONS = (1 << 2),
 		};
 
 		enum {
@@ -822,7 +823,9 @@ public:
 			float motion_region_min[8][4];
 			float motion_region_max[8][4];
 			int32_t motion_region_count;
-			int32_t motion_pad[3];
+			// Roughness below which RT reflections fully replace probe glossy.
+			float rt_reflections_fade_start;
+			int32_t motion_pad[2];
 };
 
 		// Mirrors InstanceData in ddgi.glsl (std430).
@@ -875,6 +878,8 @@ public:
 		bool use_probe_relocation = true;
 		bool use_probe_classification = true;
 		float min_frontface_distance = 0.3;
+		bool use_rt_reflections = true;
+		float rt_reflections_max_roughness = 0.6;
 
 		// Scrolling state.
 		Vector3i scroll_offsets;
@@ -926,6 +931,10 @@ public:
 
 		LocalVector<RD::AccelerationStructureInstance> tlas_instances;
 		LocalVector<InstanceDataSSBO> instance_data;
+		// Previous frame's TLAS inputs: when nothing changed (and no BLAS was
+		// rebuilt in place), the TLAS rebuild and instance upload are skipped.
+		LocalVector<RD::AccelerationStructureInstance> prev_tlas_instances;
+		LocalVector<InstanceDataSSBO> prev_instance_data;
 
 		void create(RID p_env, const Vector3 &p_world_position, GI *p_gi);
 		// Returns true when settings changed in a way that requires a probe reset.

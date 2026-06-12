@@ -305,6 +305,10 @@ void DLSSEffect::_eval_callback(RenderingDeviceDriver *p_driver, RDD::CommandBuf
 
 void DLSSEffect::upscale(const Parameters &p_params) {
 	ERR_FAIL_NULL(p_params.context);
+	// Feeding NGX a null image device-losts the GPU; fail loudly instead.
+	ERR_FAIL_COND_MSG(p_params.color.is_null() || p_params.depth.is_null() || p_params.velocity.is_null() || p_params.output.is_null(),
+			vformat("DLSS upscale skipped: missing input (color %d depth %d velocity %d output %d).",
+					p_params.color.is_valid(), p_params.depth.is_valid(), p_params.velocity.is_valid(), p_params.output.is_valid()));
 	DLSSContext *context = p_params.context;
 
 	DLSSContext::EvalPayload &payload = context->payload_ring[context->payload_cursor];

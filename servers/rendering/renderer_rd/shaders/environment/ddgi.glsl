@@ -15,13 +15,16 @@
 // are also written as storage images by the blend passes in the same frame,
 // and keeping a single usage type avoids layout transitions inside the
 // raytracing list. Bilinear filtering is done manually in ddgi_inc.glsl.
-layout(rgba16f, set = 0, binding = 5) uniform restrict readonly image2DArray ddgi_irradiance_image;
-layout(rg16f, set = 0, binding = 6) uniform restrict readonly image2DArray ddgi_distance_image;
-layout(rgba16f, set = 0, binding = 7) uniform restrict readonly image2DArray ddgi_probe_data_image;
+// The trace runs before the blend passes write the atlases this frame, so it
+// reads last frame's data as sampled textures (hardware bilinear is ~4x fewer
+// fetches than manual filtering of storage images).
+layout(set = 0, binding = 5) uniform texture2DArray ddgi_irradiance_texture;
+layout(set = 0, binding = 6) uniform texture2DArray ddgi_distance_texture;
+layout(set = 0, binding = 7) uniform texture2DArray ddgi_probe_data_texture;
 
 layout(set = 0, binding = 8) uniform sampler linear_sampler;
 
-#define DDGI_INC_SAMPLING_IMAGE
+#define DDGI_INC_SAMPLING
 #include "ddgi_inc.glsl"
 
 #define LIGHT_TYPE_DIRECTIONAL 0

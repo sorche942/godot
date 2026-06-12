@@ -18,13 +18,15 @@
 // based glossy fallback for smooth surfaces and fades back into it as
 // roughness approaches the cutoff.
 
-layout(rgba16f, set = 0, binding = 4) uniform restrict readonly image2DArray ddgi_irradiance_image;
-layout(rg16f, set = 0, binding = 5) uniform restrict readonly image2DArray ddgi_distance_image;
-layout(rgba16f, set = 0, binding = 6) uniform restrict readonly image2DArray ddgi_probe_data_image;
+// The DDGI update has fully finished by the time reflections run; sampled
+// textures give hardware bilinear at ~4x fewer fetches.
+layout(set = 0, binding = 4) uniform texture2DArray ddgi_irradiance_texture;
+layout(set = 0, binding = 5) uniform texture2DArray ddgi_distance_texture;
+layout(set = 0, binding = 6) uniform texture2DArray ddgi_probe_data_texture;
 
 layout(set = 0, binding = 7) uniform sampler linear_sampler;
 
-#define DDGI_INC_SAMPLING_IMAGE
+#define DDGI_INC_SAMPLING
 #include "ddgi_inc.glsl"
 
 #define LIGHT_TYPE_DIRECTIONAL 0

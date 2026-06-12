@@ -19,6 +19,7 @@
 
 #define DDGI_FLAG_PROBE_RELOCATION (1 << 0)
 #define DDGI_FLAG_PROBE_CLASSIFICATION (1 << 1)
+#define DDGI_FLAG_RT_REFLECTIONS (1 << 2)
 
 #define DDGI_SKY_MODE_COLOR 0
 #define DDGI_SKY_MODE_SKY_2D 1
@@ -64,7 +65,9 @@ struct DDGIVolumeData {
 	vec4 motion_region_max[8];
 
 	int motion_region_count;
-	int motion_pad0;
+	// Roughness below which the RT reflections pass fully overwrites the
+	// probe-glossy reflection (so the apply pass can skip computing it).
+	float rt_reflections_fade_start;
 	int motion_pad1;
 	int motion_pad2;
 };

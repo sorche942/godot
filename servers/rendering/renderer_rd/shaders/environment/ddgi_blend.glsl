@@ -53,6 +53,13 @@ shared int s_brightness_sum_fp;
 #define PROBE_STAT_FP_SCALE 4096.0
 #endif
 
+// Cooperative ray cache: every interior texel folds in the same rays, so each
+// chunk of ray directions (trig) and ray samples (image loads) is computed and
+// loaded once per workgroup instead of once per texel.
+#define BLEND_WG_THREADS (OCT_TOTAL_TEXELS * OCT_TOTAL_TEXELS)
+shared vec3 s_ray_dir_cache[BLEND_WG_THREADS];
+shared vec4 s_ray_sample_cache[BLEND_WG_THREADS];
+
 float linear_rgb_to_luminance(vec3 rgb) {
 	return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
 }
@@ -128,43 +135,51 @@ void main() {
 		}
 	}
 
-	if (!is_border_texel) {
-		ivec3 storage_coords = ddgi_probe_texel_coords(probe_index, ddgi.data);
+	ivec3 storage_coords = ddgi_probe_texel_coords(probe_index, ddgi.data);
 
-		// Clear and skip blending for probes that scrolled to a new position this frame.
-		if (ddgi_probe_scroll_cleared(storage_coords, ddgi.data)) {
-			imageStore(output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
+	// Per-probe (workgroup-uniform) early conditions, hoisted out of the
+	// border-texel divergence so the cooperative loop's barriers stay in
+	// uniform control flow.
+	bool scroll_cleared = ddgi_probe_scroll_cleared(storage_coords, ddgi.data);
+	bool use_classification = (ddgi.data.flags & DDGI_FLAG_PROBE_CLASSIFICATION) != 0;
+	bool probe_inactive = use_classification && imageLoad(probe_data, storage_coords).w == DDGI_PROBE_STATE_INACTIVE;
+	bool blending = !is_border_texel && !scroll_cleared && !probe_inactive;
+
+	vec3 probe_ray_direction = vec3(0.0);
+	if (blending) {
+		ivec2 interior_coords = group_thread.xy - ivec2(1);
+		vec2 probe_octant_uv = ddgi_normalized_oct_coord(interior_coords, OCT_INTERIOR_TEXELS);
+		probe_ray_direction = ddgi_oct_direction(probe_octant_uv);
+	}
+
+	int ray_start = 0;
+	if ((ddgi.data.flags & (DDGI_FLAG_PROBE_RELOCATION | DDGI_FLAG_PROBE_CLASSIFICATION)) != 0) {
+		// Fixed rays would bias the result, don't blend them.
+		ray_start = DDGI_NUM_FIXED_RAYS;
+	}
+
 #ifdef MODE_IRRADIANCE
-			imageStore(fast_output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
-#endif
-		} else {
-			bool use_classification = (ddgi.data.flags & DDGI_FLAG_PROBE_CLASSIFICATION) != 0;
-			if (use_classification && imageLoad(probe_data, storage_coords).w == DDGI_PROBE_STATE_INACTIVE) {
-				// Don't blend rays for inactive probes.
-			} else {
-				ivec2 interior_coords = group_thread.xy - ivec2(1);
-				vec2 probe_octant_uv = ddgi_normalized_oct_coord(interior_coords, OCT_INTERIOR_TEXELS);
-				vec3 probe_ray_direction = ddgi_oct_direction(probe_octant_uv);
-
-				int ray_index = 0;
-				if ((ddgi.data.flags & (DDGI_FLAG_PROBE_RELOCATION | DDGI_FLAG_PROBE_CLASSIFICATION)) != 0) {
-					// Fixed rays would bias the result, don't blend them.
-					ray_index = DDGI_NUM_FIXED_RAYS;
-				}
-
-#ifdef MODE_IRRADIANCE
-				int backfaces = 0;
-				int max_backfaces = int(float(ddgi.data.probe_ray_count - ray_index) * ddgi.data.random_backface_threshold);
+	int backfaces = 0;
+	int max_backfaces = int(float(ddgi.data.probe_ray_count - ray_start) * ddgi.data.random_backface_threshold);
 #endif
 
-				vec4 result = vec4(0.0);
-				bool early_out = false;
-				for (; ray_index < ddgi.data.probe_ray_count; ray_index++) {
-					vec3 ray_direction = ddgi_probe_ray_direction(ray_index, ddgi.data);
-					float weight = max(0.0, dot(probe_ray_direction, ray_direction));
+	vec4 result = vec4(0.0);
+	bool early_out = false;
 
-					ivec3 ray_tex_coords = ddgi_ray_data_texel_coords(ray_index, probe_index, ddgi.data);
-					vec4 ray_sample = imageLoad(ray_data, ray_tex_coords);
+	if (!scroll_cleared && !probe_inactive) {
+		for (int chunk_start = ray_start; chunk_start < ddgi.data.probe_ray_count; chunk_start += BLEND_WG_THREADS) {
+			int load_index = chunk_start + int(gl_LocalInvocationIndex);
+			if (load_index < ddgi.data.probe_ray_count) {
+				s_ray_dir_cache[gl_LocalInvocationIndex] = ddgi_probe_ray_direction(load_index, ddgi.data);
+				s_ray_sample_cache[gl_LocalInvocationIndex] = imageLoad(ray_data, ddgi_ray_data_texel_coords(load_index, probe_index, ddgi.data));
+			}
+			barrier();
+
+			if (blending && !early_out) {
+				int chunk_count = min(BLEND_WG_THREADS, ddgi.data.probe_ray_count - chunk_start);
+				for (int i = 0; i < chunk_count; i++) {
+					vec4 ray_sample = s_ray_sample_cache[i];
+					float weight = max(0.0, dot(probe_ray_direction, s_ray_dir_cache[i]));
 
 #ifdef MODE_IRRADIANCE
 					if (ray_sample.w < 0.0) {
@@ -192,7 +207,20 @@ void main() {
 					result += vec4(ray_distance * weight, (ray_distance * ray_distance) * weight, 0.0, weight);
 #endif
 				}
+			}
+			barrier();
+		}
+	}
 
+	if (!is_border_texel) {
+		// Clear and skip blending for probes that scrolled to a new position this frame.
+		if (scroll_cleared) {
+			imageStore(output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
+#ifdef MODE_IRRADIANCE
+			imageStore(fast_output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
+#endif
+		} else if (!probe_inactive) {
+			{
 				if (!early_out) {
 					int blended_ray_count = ddgi.data.probe_ray_count;
 					if ((ddgi.data.flags & (DDGI_FLAG_PROBE_RELOCATION | DDGI_FLAG_PROBE_CLASSIFICATION)) != 0) {

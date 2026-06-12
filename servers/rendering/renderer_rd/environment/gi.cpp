@@ -3814,14 +3814,14 @@ void GI::init(SkyRD *p_sky) {
 	default_voxel_gi_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(VoxelGIData) * MAX_VOXEL_GI_INSTANCES);
 	default_ddgi_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(DDGI::VolumeDataUBO));
 	{
-		// Default storage-capable textures for the DDGI image bindings of the GI
-		// apply shader when DDGI is inactive.
+		// Default textures for the DDGI bindings of the GI apply shader when
+		// DDGI is inactive.
 		RD::TextureFormat tf;
 		tf.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
 		tf.width = 4;
 		tf.height = 4;
 		tf.array_layers = 1;
-		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT;
+		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		default_ddgi_rgba16f_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 		tf.format = RD::DATA_FORMAT_R16G16_SFLOAT;
@@ -4198,6 +4198,83 @@ void GI::DDGI::fill_volume_ubo(VolumeDataUBO &r_ubo) const {
 	r_ubo.brightness_threshold = 0.1;
 }
 
+// GPU/CPU profiler for the DDGI passes, enabled with GODOT_DDGI_PROFILE=1.
+// Captures RD timestamps between passes and prints a per-pass average every
+// 120 frames. Timestamp results lag a few frames (query readback); markers are
+// matched by name so the lag doesn't matter for averages.
+struct DDGIProfiler {
+	int enabled = -1;
+	uint64_t frames = 0;
+	double sum_collect_cpu_us = 0;
+	double sum_tlas = 0, sum_trace = 0, sum_blend = 0, sum_refl = 0, sum_apply = 0;
+
+	bool is_enabled() {
+		if (enabled == -1) {
+			enabled = OS::get_singleton()->get_environment("GODOT_DDGI_PROFILE") == "1" ? 1 : 0;
+		}
+		return enabled == 1;
+	}
+
+	void mark(const String &p_name) {
+		if (is_enabled()) {
+			RD::get_singleton()->capture_timestamp(p_name);
+		}
+	}
+
+	void report(double p_collect_cpu_us) {
+		if (!is_enabled()) {
+			return;
+		}
+		RD *rd = RD::get_singleton();
+		uint64_t t_begin = 0, t_collect = 0, t_tlas = 0, t_trace = 0, t_blend = 0, t_gi0 = 0, t_gi1 = 0, refl_begin = 0;
+		double refl = 0;
+		for (uint32_t i = 0; i < rd->get_captured_timestamps_count(); i++) {
+			String n = rd->get_captured_timestamp_name(i);
+			if (!n.begins_with("ddgi/")) {
+				continue;
+			}
+			uint64_t t = rd->get_captured_timestamp_gpu_time(i);
+			if (n == "ddgi/begin") {
+				t_begin = t;
+			} else if (n == "ddgi/collect") {
+				t_collect = t;
+			} else if (n == "ddgi/tlas") {
+				t_tlas = t;
+			} else if (n == "ddgi/trace") {
+				t_trace = t;
+			} else if (n == "ddgi/blend") {
+				t_blend = t;
+			} else if (n == "ddgi/refl_begin") {
+				refl_begin = t;
+			} else if (n == "ddgi/refl_end") {
+				refl += double(t - refl_begin);
+			} else if (n == "ddgi/gi_begin") {
+				t_gi0 = t;
+			} else if (n == "ddgi/gi_end") {
+				t_gi1 = t;
+			}
+		}
+		if (t_blend == 0) {
+			return; // No completed capture yet.
+		}
+		frames++;
+		sum_collect_cpu_us += p_collect_cpu_us;
+		sum_tlas += double(t_tlas - t_collect);
+		sum_trace += double(t_trace - t_tlas);
+		sum_blend += double(t_blend - t_trace);
+		sum_refl += refl;
+		sum_apply += double(t_gi1 - t_gi0);
+		if (frames % 120 == 0) {
+			double n = double(frames) * 1000.0; // Timestamps are in nanoseconds.
+			print_line(vformat("DDGI PROFILE avg over %d frames (us): collect_cpu %.0f | tlas %.1f | trace %.1f | blend %.1f | reflections %.1f | gi_apply %.1f | gpu_total %.1f",
+					frames, sum_collect_cpu_us / double(frames), sum_tlas / n, sum_trace / n, sum_blend / n, sum_refl / n, sum_apply / n,
+					(sum_tlas + sum_trace + sum_blend + sum_refl + sum_apply) / n));
+		}
+	}
+};
+
+static DDGIProfiler ddgi_profiler;
+
 void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
@@ -4211,6 +4288,8 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 
 
 	RD::get_singleton()->draw_command_begin_label("DDGI Update");
+	ddgi_profiler.mark("ddgi/begin");
+	uint64_t profile_cpu_t0 = OS::get_singleton()->get_ticks_usec();
 
 	frame++;
 
@@ -4231,6 +4310,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	tlas_instances.clear();
 	instance_data.clear();
 	albedo_texture_table.clear();
+	bool tlas_inputs_dirty = false;
 
 	static const StringName albedo_param_name = "albedo";
 	static const StringName emission_param_name = "emission";
@@ -4352,6 +4432,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				bool has_rt_data = false;
 				if (deformed) {
 					has_rt_data = mesh_storage->mesh_instance_surface_get_rt_data(inst->mesh_instance, s, rt_data);
+					// The deformed BLAS is rebuilt in place: the TLAS inputs
+					// look unchanged but the TLAS must still be rebuilt.
+					tlas_inputs_dirty = tlas_inputs_dirty || has_rt_data;
 				}
 				if (!has_rt_data) {
 					has_rt_data = mesh_storage->mesh_surface_get_rt_data(surface, rt_data);
@@ -4568,6 +4651,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 		}
 		tlas_capacity = MAX(64u, Math::next_power_of_2(instance_count));
 		tlas = RD::get_singleton()->tlas_create(tlas_capacity, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+		// The new TLAS is unbuilt regardless of what the inputs look like.
+		prev_tlas_instances.clear();
+		tlas_inputs_dirty = true;
 	}
 
 	if (instance_buffer.is_null() || instance_count > instance_buffer_capacity) {
@@ -4576,13 +4662,43 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 		}
 		instance_buffer_capacity = MAX(64u, Math::next_power_of_2(instance_count));
 		instance_buffer = RD::get_singleton()->storage_buffer_create(instance_buffer_capacity * sizeof(InstanceDataSSBO));
+		// The new buffer holds garbage: force the upload even when the data
+		// matches last frame's (e.g. after free_data() on a buffer resize —
+		// skipping it would leave the trace dereferencing uninitialized
+		// vertex buffer addresses, which is a device loss).
+		prev_instance_data.clear();
+		tlas_inputs_dirty = true;
 	}
 
-	if (instance_count > 0) {
-		RD::get_singleton()->buffer_update(instance_buffer, 0, instance_count * sizeof(InstanceDataSSBO), instance_data.ptr());
+	// Static scenes skip the TLAS rebuild and instance upload: compare against
+	// the previous frame's inputs. AccelerationStructureInstance has interior
+	// padding, so compare it field-wise rather than with memcmp.
+	if (!tlas_inputs_dirty) {
+		tlas_inputs_dirty = tlas_instances.size() != prev_tlas_instances.size();
+		for (uint32_t i = 0; !tlas_inputs_dirty && i < tlas_instances.size(); i++) {
+			const RD::AccelerationStructureInstance &a = tlas_instances[i];
+			const RD::AccelerationStructureInstance &b = prev_tlas_instances[i];
+			tlas_inputs_dirty = a.transform != b.transform || a.id != b.id || a.mask != b.mask || a.hit_sbt_range != b.hit_sbt_range || a.flags != b.flags || a.blas != b.blas;
+		}
+	}
+	bool instances_dirty = instance_count != prev_instance_data.size() ||
+			(instance_count > 0 && memcmp(instance_data.ptr(), prev_instance_data.ptr(), instance_count * sizeof(InstanceDataSSBO)) != 0);
+
+	double profile_collect_cpu_us = double(OS::get_singleton()->get_ticks_usec() - profile_cpu_t0);
+	ddgi_profiler.mark("ddgi/collect");
+
+	if (instances_dirty) {
+		if (instance_count > 0) {
+			RD::get_singleton()->buffer_update(instance_buffer, 0, instance_count * sizeof(InstanceDataSSBO), instance_data.ptr());
+		}
+		prev_instance_data = instance_data;
 	}
 
-	RD::get_singleton()->tlas_build(tlas, tlas_instances.span());
+	if (tlas_inputs_dirty) {
+		RD::get_singleton()->tlas_build(tlas, tlas_instances.span());
+		prev_tlas_instances = tlas_instances;
+	}
+	ddgi_profiler.mark("ddgi/tlas");
 
 	/* Collect lights. */
 
@@ -4725,6 +4841,15 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 		fill_volume_ubo(ubo);
 		ubo.light_count = light_count;
 
+		// Lets the apply pass skip computing probe glossy where the RT
+		// reflections pass fully overwrites it (its fade starts at 0.7x).
+		use_rt_reflections = environment.is_valid() && scene_render->environment_get_ddgi_reflections(environment);
+		rt_reflections_max_roughness = environment.is_valid() ? scene_render->environment_get_ddgi_reflections_max_roughness(environment) : 0.6f;
+		if (use_rt_reflections) {
+			ubo.flags |= FLAG_RT_REFLECTIONS;
+		}
+		ubo.rt_reflections_fade_start = rt_reflections_max_roughness * 0.7f;
+
 		ubo.motion_region_count = int32_t(MIN(motion_regions.size(), 8u));
 		for (int32_t r = 0; r < ubo.motion_region_count; r++) {
 			const AABB &region = motion_regions[r];
@@ -4811,9 +4936,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, instance_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, lights_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ray_data_tex),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, irradiance_fast_tex),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, distance_tex),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, probe_data_tex),
+			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 5, irradiance_fast_tex),
+			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 6, distance_tex),
+			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 7, probe_data_tex),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 8, linear_sampler),
 			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, sky_2d),
 			RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 10, sky_array),
@@ -4825,6 +4950,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	RD::get_singleton()->raytracing_list_bind_uniform_set(raytracing_list, trace_uniform_set, 0);
 	RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, gi->ddgi_shader.hit_sbt, rays_per_probe, get_probes_per_plane(), probe_counts.y);
 	RD::get_singleton()->raytracing_list_end();
+	ddgi_profiler.mark("ddgi/trace");
 
 	/* Blend irradiance and distance, then relocate and classify probes. */
 
@@ -4872,6 +4998,8 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	}
 
 	RD::get_singleton()->compute_list_end();
+	ddgi_profiler.mark("ddgi/blend");
+	ddgi_profiler.report(profile_collect_cpu_us);
 
 	RD::get_singleton()->draw_command_end_label();
 
@@ -5041,6 +5169,9 @@ void GI::DDGI::free_data() {
 		tlas = RID();
 		tlas_capacity = 0;
 	}
+	// The change-detection caches describe GPU objects that no longer exist.
+	prev_tlas_instances.clear();
+	prev_instance_data.clear();
 }
 
 GI::DDGI::~DDGI() {
@@ -5078,6 +5209,7 @@ void GI::process_rt_reflections(Ref<RenderSceneBuffersRD> p_render_buffers, Rend
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
 	RD::get_singleton()->draw_command_begin_label("DDGI Reflections");
+	ddgi_profiler.mark("ddgi/refl_begin");
 
 	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
@@ -5132,9 +5264,9 @@ void GI::process_rt_reflections(Ref<RenderSceneBuffersRD> p_render_buffers, Rend
 				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, ddgi->volume_ubo),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, ddgi->instance_buffer),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, ddgi->lights_buffer),
-				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ddgi->irradiance_fast_tex),
-				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, ddgi->distance_tex),
-				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, ddgi->probe_data_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 4, ddgi->irradiance_fast_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 5, ddgi->distance_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 6, ddgi->probe_data_tex),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 7, linear_sampler),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 8, sky_2d),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 9, sky_array),
@@ -5153,6 +5285,7 @@ void GI::process_rt_reflections(Ref<RenderSceneBuffersRD> p_render_buffers, Rend
 		RD::get_singleton()->raytracing_list_end();
 	}
 
+	ddgi_profiler.mark("ddgi/refl_end");
 	RD::get_singleton()->draw_command_end_label();
 }
 
@@ -5293,6 +5426,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 	ERR_FAIL_COND_MSG(p_view_count > 2, "Maximum of 2 views supported for Processing GI.");
 
 	RD::get_singleton()->draw_command_begin_label("GI Render");
+	ddgi_profiler.mark("ddgi/gi_begin");
 
 	ERR_FAIL_COND(p_render_buffers.is_null());
 
@@ -5612,9 +5746,9 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		// DDGI resources live in their own uniform set, rebuilt per frame through the cache.
 		RID gi_variant_shader = shader.version_get_shader(shader_version, (RendererSceneRenderRD::get_singleton()->is_vrs_supported() ? MODE_MAX : 0) + mode);
 		RID ddgi_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(gi_variant_shader, 1,
-				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 0, use_ddgi ? ddgi->irradiance_tex : default_ddgi_rgba16f_tex),
-				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, use_ddgi ? ddgi->distance_tex : default_ddgi_rg16f_tex),
-				RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, use_ddgi ? ddgi->probe_data_tex : default_ddgi_rgba16f_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, use_ddgi ? ddgi->irradiance_tex : default_ddgi_rgba16f_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, use_ddgi ? ddgi->distance_tex : default_ddgi_rg16f_tex),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, use_ddgi ? ddgi->probe_data_tex : default_ddgi_rgba16f_tex),
 				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 3, use_ddgi ? ddgi->volume_ubo : default_ddgi_ubo));
 
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[pipeline_specialization][mode].get_rid());
@@ -5630,6 +5764,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 	}
 
 	RD::get_singleton()->compute_list_end();
+	ddgi_profiler.mark("ddgi/gi_end");
 	RD::get_singleton()->draw_command_end_label();
 }
 
