@@ -2269,8 +2269,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			// objects. FSR 2 keeps the (-1, -1) sentinel + internal re-derivation.
 			if (scale_type == SCALE_MFX || scale_type == SCALE_DLSS) {
 				motion_vectors_store->process(rb,
-						p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
-						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform);
+						p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform,
+						p_render_data->scene_data->prev_view_projection, p_render_data->scene_data->prev_cam_transform);
 			} else {
 				Vector<Color> motion_vector_clear_colors;
 				motion_vector_clear_colors.push_back(Color(-1, -1, 0, 0));

@@ -49,8 +49,8 @@ MotionVectorsStore::~MotionVectorsStore() {
 }
 
 void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
-		const Projection &p_current_projection, const Transform3D &p_current_transform,
-		const Projection &p_previous_projection, const Transform3D &p_previous_transform) {
+		const Projection *p_current_view_projection, const Transform3D &p_current_transform,
+		const Projection *p_previous_view_projection, const Transform3D &p_previous_transform) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	ERR_FAIL_NULL(material_storage);
 
@@ -60,16 +60,17 @@ void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 	uint32_t view_count = p_render_buffers->get_view_count();
 	Size2i internal_size = p_render_buffers->get_internal_size();
 
-	PushConstant push_constant;
-	{
-		push_constant.resolution[0] = internal_size.width;
-		push_constant.resolution[1] = internal_size.height;
+	Projection correction;
+	correction.set_depth_correction(true, true, false);
 
-		Projection correction;
-		correction.set_depth_correction(true, true, false);
-		Projection reprojection = (correction * p_previous_projection) * p_previous_transform.affine_inverse() * p_current_transform * (correction * p_current_projection).inverse();
-		RendererRD::MaterialStorage::store_camera(reprojection, push_constant.reprojection_matrix);
-	}
+	// Compose the per-eye projection with the shared camera transform to obtain
+	// a full world->clip matrix per view. In stereo the eye offset is already
+	// baked into view_projection[v]; in mono view_projection[0] is the bare
+	// projection, so this becomes P*T^-1 and the reprojection below reduces to
+	// (correction*prev_P)*prev_T^-1*T*(correction*P)^-1 -- identical to the
+	// previous single-matrix code path.
+	Projection current_view_inverse = Projection(p_current_transform.affine_inverse());
+	Projection previous_view_inverse = Projection(p_previous_transform.affine_inverse());
 
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
@@ -81,7 +82,16 @@ void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipeline);
 
+	PushConstant push_constant;
+	push_constant.resolution[0] = internal_size.width;
+	push_constant.resolution[1] = internal_size.height;
+
 	for (uint32_t v = 0; v < view_count; v++) {
+		Projection current_view_projection = p_current_view_projection[v] * current_view_inverse;
+		Projection previous_view_projection = p_previous_view_projection[v] * previous_view_inverse;
+		Projection reprojection = (correction * previous_view_projection) * (correction * current_view_projection).inverse();
+		RendererRD::MaterialStorage::store_camera(reprojection, push_constant.reprojection_matrix);
+
 		RID velocity = p_render_buffers->get_velocity_buffer(false, v);
 		RID depth = p_render_buffers->get_depth_texture(v);
 		RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, depth }));

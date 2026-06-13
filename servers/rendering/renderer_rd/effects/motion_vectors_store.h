@@ -49,8 +49,14 @@ public:
 	MotionVectorsStore();
 	~MotionVectorsStore();
 
+	// Derives per-view camera motion from depth. Each entry of the projection
+	// arrays is composed with the shared (head/camera) transform into a full
+	// world->clip matrix, so reprojection is correct per eye in stereo (where
+	// the per-eye offset lives inside view_projection[v]) while collapsing to
+	// the previous single-matrix formula for mono (where view_projection[0] is
+	// the bare projection).
 	void process(Ref<RenderSceneBuffersRD> p_render_buffers,
-			const Projection &p_current_projection, const Transform3D &p_current_transform,
-			const Projection &p_previous_projection, const Transform3D &p_previous_transform);
+			const Projection *p_current_view_projection, const Transform3D &p_current_transform,
+			const Projection *p_previous_view_projection, const Transform3D &p_previous_transform);
 };
 } //namespace RendererRD
