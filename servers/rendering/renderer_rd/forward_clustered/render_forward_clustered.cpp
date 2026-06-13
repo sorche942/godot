@@ -2261,7 +2261,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RD::get_singleton()->draw_command_end_label();
 
 		if (using_motion_pass) {
-			if (scale_type == SCALE_MFX) {
+			// MetalFX Temporal can't consume per-object motion vectors, and DLSS can't
+			// derive camera motion from depth by itself (unlike FSR 2, which has a
+			// Godot patch that re-derives the (-1, -1) sentinel pixels internally).
+			// For both, seed the whole velocity buffer with camera motion derived
+			// from depth; the per-object motion pass below then overwrites dynamic
+			// objects. FSR 2 keeps the (-1, -1) sentinel + internal re-derivation.
+			if (scale_type == SCALE_MFX || scale_type == SCALE_DLSS) {
 				motion_vectors_store->process(rb,
 						p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
 						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform);
@@ -5397,8 +5403,11 @@ RenderForwardClustered::RenderForwardClustered() {
 	dlss_effect = memnew(RendererRD::DLSSEffect);
 #endif
 	ss_effects = memnew(RendererRD::SSEffects);
-#ifdef METAL_MFXTEMPORAL_ENABLED
+	// MotionVectorsStore is a backend-agnostic compute effect; it is needed by
+	// any temporal upscaler that can't derive camera motion from depth itself
+	// (e.g. DLSS), not just MetalFX Temporal.
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
+#ifdef METAL_MFXTEMPORAL_ENABLED
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
 #endif
 }
@@ -5430,12 +5439,12 @@ RenderForwardClustered::~RenderForwardClustered() {
 		memdelete(mfx_temporal_effect);
 		mfx_temporal_effect = nullptr;
 	}
+#endif
 
 	if (motion_vectors_store) {
 		memdelete(motion_vectors_store);
 		motion_vectors_store = nullptr;
 	}
-#endif
 
 	RD::get_singleton()->free_rid(shadow_sampler);
 	RSG::light_storage->directional_shadow_atlas_set_size(0);

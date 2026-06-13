@@ -235,6 +235,10 @@ void DLSSEffect::_eval_callback(RenderingDeviceDriver *p_driver, RDD::CommandBuf
 
 	uint32_t view = MIN(payload->view, uint32_t(DLSSContext::MAX_VIEWS - 1));
 
+	// Reset temporal accumulation the first time a feature is evaluated (its
+	// history buffer is uninitialized), or whenever the engine requests it.
+	bool just_created = false;
+
 	if (context->features[view] == nullptr) {
 		if (context->create_failed) {
 			return;
@@ -262,6 +266,8 @@ void DLSSEffect::_eval_callback(RenderingDeviceDriver *p_driver, RDD::CommandBuf
 			ERR_PRINT(vformat("DLSS: feature creation failed (0x%x).", (uint64_t)result));
 			return;
 		}
+
+		just_created = true;
 	}
 
 	NVSDK_NGX_Resource_VK color = _make_ngx_resource(payload->color, false);
@@ -288,7 +294,7 @@ void DLSSEffect::_eval_callback(RenderingDeviceDriver *p_driver, RDD::CommandBuf
 	// Godot's velocity buffer is in UV space; DLSS wants pixels.
 	eval_params.InMVScaleX = float(payload->render_size.width);
 	eval_params.InMVScaleY = float(payload->render_size.height);
-	eval_params.InReset = payload->reset ? 1 : 0;
+	eval_params.InReset = (payload->reset || just_created) ? 1 : 0;
 
 	NVSDK_NGX_Result result = NGX_VULKAN_EVALUATE_DLSS_EXT(vk_command_buffer, context->features[view], context->ngx_parameters, &eval_params);
 	if (NVSDK_NGX_FAILED(result)) {
