@@ -815,26 +815,22 @@ void ColorPicker::_update_presets() {
 }
 
 void ColorPicker::_update_recent_presets() {
-#ifdef TOOLS_ENABLED
-	if (editor_settings) {
-		int recent_preset_count = recent_preset_hbc->get_child_count();
-		for (int i = 0; i < recent_preset_count; i++) {
-			memdelete(recent_preset_hbc->get_child(0));
-		}
-
-		recent_presets.clear();
-		for (const Color &preset : recent_preset_cache) {
-			recent_presets.push_back(preset);
-		}
-
-		int preset_size = _get_preset_size();
-		for (const Color &preset : recent_presets) {
-			_add_recent_preset_button(preset_size, preset);
-		}
-
-		_notification(NOTIFICATION_VISIBILITY_CHANGED);
+	int recent_preset_count = recent_preset_hbc->get_child_count();
+	for (int i = 0; i < recent_preset_count; i++) {
+		memdelete(recent_preset_hbc->get_child(0));
 	}
-#endif
+
+	recent_presets.clear();
+	for (const Color &preset : recent_preset_cache) {
+		recent_presets.push_back(preset);
+	}
+
+	int preset_size = _get_preset_size();
+	for (const Color &preset : recent_presets) {
+		_add_recent_preset_button(preset_size, preset);
+	}
+
+	_notification(NOTIFICATION_VISIBILITY_CHANGED);
 }
 
 #ifdef TOOLS_ENABLED
