@@ -142,8 +142,10 @@ void main() {
 	// uniform control flow.
 	bool scroll_cleared = ddgi_probe_scroll_cleared(storage_coords, ddgi.data);
 	bool use_classification = (ddgi.data.flags & DDGI_FLAG_PROBE_CLASSIFICATION) != 0;
-	bool probe_inactive = use_classification && imageLoad(probe_data, storage_coords).w == DDGI_PROBE_STATE_INACTIVE;
-	bool blending = !is_border_texel && !scroll_cleared && !probe_inactive;
+	// Scroll-cleared probes may inherit a stale INACTIVE state from the
+	// previous occupant of their toroidal storage slot. Force active.
+	bool probe_inactive = !scroll_cleared && use_classification && imageLoad(probe_data, storage_coords).w == DDGI_PROBE_STATE_INACTIVE;
+	bool blending = !is_border_texel && !probe_inactive;
 
 	vec3 probe_ray_direction = vec3(0.0);
 	if (blending) {
@@ -166,7 +168,7 @@ void main() {
 	vec4 result = vec4(0.0);
 	bool early_out = false;
 
-	if (!scroll_cleared && !probe_inactive) {
+	if (!probe_inactive) {
 		for (int chunk_start = ray_start; chunk_start < ddgi.data.probe_ray_count; chunk_start += BLEND_WG_THREADS) {
 			int load_index = chunk_start + int(gl_LocalInvocationIndex);
 			if (load_index < ddgi.data.probe_ray_count) {
@@ -213,13 +215,7 @@ void main() {
 	}
 
 	if (!is_border_texel) {
-		// Clear and skip blending for probes that scrolled to a new position this frame.
-		if (scroll_cleared) {
-			imageStore(output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
-#ifdef MODE_IRRADIANCE
-			imageStore(fast_output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
-#endif
-		} else if (!probe_inactive) {
+		if (!probe_inactive) {
 			{
 				if (!early_out) {
 					int blended_ray_count = ddgi.data.probe_ray_count;
@@ -237,15 +233,17 @@ void main() {
 					vec4 previous_texel = imageLoad(output_texture, thread_coords);
 					vec3 previous = previous_texel.rgb;
 
-					// Freshly cleared probes (reset or scrolled) adopt the new value
-					// immediately instead of slowly converging from black.
+					// Scroll-cleared probes: the old storage value is from the opposite
+					// side of the toroidal grid (the slot wrapped around), so it cannot
+					// seed the blend. The trace already ran for these probes — snap to
+					// the fresh estimate instead of publishing black or ghosting the
+					// stale value.
 #ifdef MODE_IRRADIANCE
 					// The alpha channel is never written as zero by the blend, so it
-					// doubles as the "cleared" marker; testing rgb would re-trigger
-					// for texels whose converged value is genuinely black.
-					bool probe_reset = previous_texel.a == 0.0;
+					// doubles as the "cleared" marker for initial convergence.
+					bool probe_reset = scroll_cleared || previous_texel.a == 0.0;
 #else
-					bool probe_reset = dot(previous, previous) == 0.0;
+					bool probe_reset = scroll_cleared || dot(previous, previous) == 0.0;
 #endif
 					float hysteresis = probe_reset ? 0.0 : ddgi.data.probe_hysteresis;
 
@@ -345,6 +343,13 @@ void main() {
 					// regimes are mutually exclusive by construction.
 					hysteresis = mix(hysteresis, 0.5, consistency);
 					hysteresis = mix(hysteresis, 1.0, convergence);
+					// Probe reset overrides the convergence freeze: the stale storage
+					// value makes the change statistics (EMA, fast-vs-display gap)
+					// meaningless — they compare two values from the wrong side of the
+					// toroidal grid. Snap to the fresh trace estimate unconditionally.
+					if (probe_reset) {
+						hysteresis = 0.0;
+					}
 
 					if (probe_in_motion) {
 						// Track moving geometry quickly and coherently; the extra
@@ -371,6 +376,16 @@ void main() {
 
 					imageStore(output_texture, thread_coords, result);
 				}
+#ifdef MODE_IRRADIANCE
+				else if (scroll_cleared) {
+					// Probe is inside geometry (early_out from too many backface
+					// hits) at a new scrolled position. Can't keep the stale
+					// toroidal value; write a cleared marker (alpha 0) so next
+					// frame snaps to a fresh estimate.
+					imageStore(output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 0.0));
+					imageStore(fast_output_texture, thread_coords, vec4(0.0, 0.0, 0.0, 1.0));
+				}
+#endif
 			}
 		}
 	}

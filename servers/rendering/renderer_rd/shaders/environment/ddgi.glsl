@@ -220,13 +220,18 @@ void main() {
 	bool use_classification = (ddgi.data.flags & DDGI_FLAG_PROBE_CLASSIFICATION) != 0;
 	bool fixed_rays = use_relocation || use_classification;
 
+	// Scroll-cleared probes may inherit stale probe_data (INACTIVE state,
+	// relocation offset) from the previous occupant of their toroidal slot.
+	bool scroll_cleared = ddgi_probe_scroll_cleared(probe_data_coords, ddgi.data);
+
 	// Inactive probes only trace the fixed rays used by classification.
-	if (use_classification && probe_data.w == DDGI_PROBE_STATE_INACTIVE && ray_index >= DDGI_NUM_FIXED_RAYS) {
+	// Scroll-cleared probes force a full trace regardless of stale state.
+	if (!scroll_cleared && use_classification && probe_data.w == DDGI_PROBE_STATE_INACTIVE && ray_index >= DDGI_NUM_FIXED_RAYS) {
 		return;
 	}
 
 	vec3 probe_world_position = ddgi_probe_world_position_base(probe_coords, ddgi.data);
-	if (use_relocation) {
+	if (use_relocation && !scroll_cleared) {
 		probe_world_position += probe_data.xyz * ddgi.data.probe_spacing;
 	}
 
