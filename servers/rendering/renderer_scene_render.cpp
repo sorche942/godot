@@ -758,6 +758,21 @@ bool RendererSceneRender::environment_get_ddgi_reflections(RID p_env) const {
 float RendererSceneRender::environment_get_ddgi_reflections_max_roughness(RID p_env) const {
 	return environment_storage.environment_get_ddgi_reflections_max_roughness(p_env);
 }
+void RendererSceneRender::environment_set_ddgi_rt_ao(RID p_env, bool p_enabled, float p_radius, float p_intensity) {
+	environment_storage.environment_set_ddgi_rt_ao(p_env, p_enabled, p_radius, p_intensity);
+}
+
+bool RendererSceneRender::environment_get_ddgi_rt_ao_enabled(RID p_env) const {
+	return environment_storage.environment_get_ddgi_rt_ao_enabled(p_env);
+}
+
+float RendererSceneRender::environment_get_ddgi_rt_ao_radius(RID p_env) const {
+	return environment_storage.environment_get_ddgi_rt_ao_radius(p_env);
+}
+
+float RendererSceneRender::environment_get_ddgi_rt_ao_intensity(RID p_env) const {
+	return environment_storage.environment_get_ddgi_rt_ao_intensity(p_env);
+}
 
 // Adjustments
 

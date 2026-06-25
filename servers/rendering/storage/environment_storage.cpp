@@ -983,6 +983,36 @@ float RendererEnvironmentStorage::environment_get_ddgi_reflections_max_roughness
 	ERR_FAIL_NULL_V(env, 0.6);
 	return env->ddgi_reflections_max_roughness;
 }
+void RendererEnvironmentStorage::environment_set_ddgi_rt_ao(RID p_env, bool p_enabled, float p_radius, float p_intensity) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+#ifdef DEBUG_ENABLED
+	if (OS::get_singleton()->get_current_rendering_method() != "forward_plus" && p_enabled) {
+		WARN_PRINT_ONCE_ED("DDGI is only available when using the Forward+ renderer.");
+	}
+#endif
+	env->ddgi_rt_ao_enabled = p_enabled;
+	env->ddgi_rt_ao_radius = p_radius;
+	env->ddgi_rt_ao_intensity = p_intensity;
+}
+
+bool RendererEnvironmentStorage::environment_get_ddgi_rt_ao_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->ddgi_rt_ao_enabled;
+}
+
+float RendererEnvironmentStorage::environment_get_ddgi_rt_ao_radius(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.0f);
+	return env->ddgi_rt_ao_radius;
+}
+
+float RendererEnvironmentStorage::environment_get_ddgi_rt_ao_intensity(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1.0f);
+	return env->ddgi_rt_ao_intensity;
+}
 
 RSE::EnvironmentSDFGIYScale RendererEnvironmentStorage::environment_get_sdfgi_y_scale(RID p_env) const {
 	Environment *env = environment_owner.get_or_null(p_env);

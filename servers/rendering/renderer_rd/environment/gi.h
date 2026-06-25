@@ -41,6 +41,7 @@
 #include "servers/rendering/renderer_rd/shaders/environment/ddgi_probe_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/gi.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/rt_reflections.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/rt_ao.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_debug.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_debug_probes.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/sdfgi_direct_light.glsl.gen.h"
@@ -59,6 +60,8 @@
 
 #define RB_TEX_AMBIENT SNAME("ambient")
 #define RB_TEX_REFLECTION SNAME("reflection")
+#define RB_TEX_RT_AO SNAME("rt_ao")
+#define RB_TEX_RT_AO_HISTORY SNAME("rt_ao_history")
 
 // Forward declare RenderDataRD and RendererSceneRenderRD so we can pass it into some of our methods, these classes are pretty tightly bound
 class RenderDataRD;
@@ -484,6 +487,12 @@ private:
 		RID reflections_pipeline;
 		RID reflections_hit_sbt;
 		RD::HitShaderBindingTableRange reflections_hit_sbt_range = 0;
+		RtAoShaderRD rt_ao;
+		RID rt_ao_version;
+		RID rt_ao_shader;
+		RID rt_ao_pipeline;
+		RID rt_ao_hit_sbt;
+		RD::HitShaderBindingTableRange rt_ao_hit_sbt_range = 0;
 	} ddgi_shader;
 
 public:
@@ -511,6 +520,7 @@ public:
 
 		/* GI buffers */
 		bool using_half_size_gi = false;
+		bool rt_ao_history_valid = false;
 
 		RID uniform_set[RendererSceneRender::MAX_RENDER_VIEWS];
 		uint32_t uniform_set_mode = 0xFFFFFFFF; // Shader variant the uniform sets were created against.
@@ -923,6 +933,7 @@ public:
 		// Per-view parameter UBOs for the reflections pass (push constants are
 		// not reliable in raytracing lists yet).
 		RID reflections_params_ubo[RendererSceneRender::MAX_RENDER_VIEWS];
+		RID rt_ao_params_ubo[RendererSceneRender::MAX_RENDER_VIEWS];
 
 		// Per-frame culled scene data, set by the renderer before render_scene.
 		const PagedArray<RenderGeometryInstance *> *pending_geometry_instances = nullptr;
@@ -1100,6 +1111,10 @@ public:
 	// Raytraced reflections, using the DDGI volume's acceleration structure and
 	// probes. Runs after process_gi and refines the reflection buffer.
 	void process_rt_reflections(Ref<RenderSceneBuffersRD> p_render_buffers, RenderDataRD *p_render_data, const RID *p_normal_roughness_slices);
+	// Ray-traced ambient occlusion: traces short rays to capture sub-probe-
+	// spacing occlusion. Must run BEFORE process_gi so the AO texture is
+	// available when ddgi_process multiplies the ambient.
+	void process_rt_ao(Ref<RenderSceneBuffersRD> p_render_buffers, RenderDataRD *p_render_data, const RID *p_normal_roughness_slices);
 
 	void setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBuffersRD> p_render_buffers, const Transform3D &p_transform, const PagedArray<RID> &p_voxel_gi_instances, uint32_t &r_voxel_gi_instances_used);
 	void process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances);

@@ -712,6 +712,32 @@ void Environment::set_ddgi_reflections_max_roughness(float p_roughness) {
 float Environment::get_ddgi_reflections_max_roughness() const {
 	return ddgi_reflections_max_roughness;
 }
+void Environment::set_ddgi_rt_ao_enabled(bool p_enabled) {
+	ddgi_rt_ao_enabled = p_enabled;
+	_update_ddgi();
+}
+
+bool Environment::is_ddgi_rt_ao_enabled() const {
+	return ddgi_rt_ao_enabled;
+}
+
+void Environment::set_ddgi_rt_ao_radius(float p_radius) {
+	ddgi_rt_ao_radius = p_radius;
+	_update_ddgi();
+}
+
+float Environment::get_ddgi_rt_ao_radius() const {
+	return ddgi_rt_ao_radius;
+}
+
+void Environment::set_ddgi_rt_ao_intensity(float p_intensity) {
+	ddgi_rt_ao_intensity = p_intensity;
+	_update_ddgi();
+}
+
+float Environment::get_ddgi_rt_ao_intensity() const {
+	return ddgi_rt_ao_intensity;
+}
 
 void Environment::_update_ddgi() {
 	RS::get_singleton()->environment_set_ddgi(
@@ -728,6 +754,11 @@ void Environment::_update_ddgi() {
 			ddgi_min_frontface_distance,
 			ddgi_reflections,
 			ddgi_reflections_max_roughness);
+	RS::get_singleton()->environment_set_ddgi_rt_ao(
+			environment,
+			ddgi_rt_ao_enabled,
+			ddgi_rt_ao_radius,
+			ddgi_rt_ao_intensity);
 }
 
 // Glow
@@ -1583,6 +1614,12 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_ddgi_using_reflections"), &Environment::is_ddgi_using_reflections);
 	ClassDB::bind_method(D_METHOD("set_ddgi_reflections_max_roughness", "roughness"), &Environment::set_ddgi_reflections_max_roughness);
 	ClassDB::bind_method(D_METHOD("get_ddgi_reflections_max_roughness"), &Environment::get_ddgi_reflections_max_roughness);
+	ClassDB::bind_method(D_METHOD("set_ddgi_rt_ao_enabled", "enabled"), &Environment::set_ddgi_rt_ao_enabled);
+	ClassDB::bind_method(D_METHOD("is_ddgi_rt_ao_enabled"), &Environment::is_ddgi_rt_ao_enabled);
+	ClassDB::bind_method(D_METHOD("set_ddgi_rt_ao_radius", "radius"), &Environment::set_ddgi_rt_ao_radius);
+	ClassDB::bind_method(D_METHOD("get_ddgi_rt_ao_radius"), &Environment::get_ddgi_rt_ao_radius);
+	ClassDB::bind_method(D_METHOD("set_ddgi_rt_ao_intensity", "intensity"), &Environment::set_ddgi_rt_ao_intensity);
+	ClassDB::bind_method(D_METHOD("get_ddgi_rt_ao_intensity"), &Environment::get_ddgi_rt_ao_intensity);
 
 	ADD_GROUP("DDGI", "ddgi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_ddgi_enabled", "is_ddgi_enabled");
@@ -1597,6 +1634,9 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_min_frontface_distance", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_ddgi_min_frontface_distance", "get_ddgi_min_frontface_distance");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_reflections"), "set_ddgi_reflections", "is_ddgi_using_reflections");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_reflections_max_roughness", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_ddgi_reflections_max_roughness", "get_ddgi_reflections_max_roughness");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ddgi_rt_ao_enabled"), "set_ddgi_rt_ao_enabled", "is_ddgi_rt_ao_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_rt_ao_radius", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_ddgi_rt_ao_radius", "get_ddgi_rt_ao_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "ddgi_rt_ao_intensity", PROPERTY_HINT_RANGE, "0,8,0.01"), "set_ddgi_rt_ao_intensity", "get_ddgi_rt_ao_intensity");
 
 	// Glow
 

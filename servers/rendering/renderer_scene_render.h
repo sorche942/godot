@@ -276,6 +276,10 @@ public:
 	float environment_get_ddgi_min_frontface_distance(RID p_env) const;
 	bool environment_get_ddgi_reflections(RID p_env) const;
 	float environment_get_ddgi_reflections_max_roughness(RID p_env) const;
+	void environment_set_ddgi_rt_ao(RID p_env, bool p_enabled, float p_radius, float p_intensity);
+	bool environment_get_ddgi_rt_ao_enabled(RID p_env) const;
+	float environment_get_ddgi_rt_ao_radius(RID p_env) const;
+	float environment_get_ddgi_rt_ao_intensity(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

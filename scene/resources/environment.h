@@ -175,6 +175,9 @@ private:
 	float ddgi_min_frontface_distance = 0.3;
 	bool ddgi_reflections = true;
 	float ddgi_reflections_max_roughness = 0.6;
+	bool ddgi_rt_ao_enabled = false;
+	float ddgi_rt_ao_radius = 0.0f;
+	float ddgi_rt_ao_intensity = 1.0f;
 	void _update_ddgi();
 
 	// Glow
@@ -389,6 +392,12 @@ public:
 	bool is_ddgi_using_reflections() const;
 	void set_ddgi_reflections_max_roughness(float p_roughness);
 	float get_ddgi_reflections_max_roughness() const;
+	void set_ddgi_rt_ao_enabled(bool p_enabled);
+	bool is_ddgi_rt_ao_enabled() const;
+	void set_ddgi_rt_ao_radius(float p_radius);
+	float get_ddgi_rt_ao_radius() const;
+	void set_ddgi_rt_ao_intensity(float p_intensity);
+	float get_ddgi_rt_ao_intensity() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

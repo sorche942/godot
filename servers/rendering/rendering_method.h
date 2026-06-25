@@ -300,6 +300,7 @@ public:
 
 	// DDGI
 	virtual void environment_set_ddgi(RID p_env, bool p_enable, const Vector3i &p_probe_counts, const Vector3 &p_probe_spacing, int p_rays_per_probe, float p_energy, float p_normal_bias, float p_view_bias, bool p_probe_relocation, bool p_probe_classification, float p_min_frontface_distance, bool p_reflections, float p_reflections_max_roughness) = 0;
+	virtual void environment_set_ddgi_rt_ao(RID p_env, bool p_enabled, float p_radius, float p_intensity) = 0;
 
 	virtual bool environment_get_sdfgi_enabled(RID p_env) const = 0;
 	virtual int environment_get_sdfgi_cascades(RID p_env) const = 0;

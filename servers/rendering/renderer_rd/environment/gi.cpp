@@ -3908,6 +3908,30 @@ void GI::init(SkyRD *p_sky) {
 				}
 			}
 
+			{
+				Vector<String> rt_ao_modes;
+				rt_ao_modes.push_back("");
+
+				ddgi_shader.rt_ao.initialize(rt_ao_modes);
+				ddgi_shader.rt_ao_version = ddgi_shader.rt_ao.version_create();
+				ddgi_shader.rt_ao_shader = ddgi_shader.rt_ao.version_get_shader(ddgi_shader.rt_ao_version, 0);
+
+				if (ddgi_shader.rt_ao_shader.is_valid()) {
+					RD::PipelineShader pipeline_shader;
+					pipeline_shader.shader = ddgi_shader.rt_ao_shader;
+					RD::HitGroup hit_group;
+					hit_group.closest_hit_shader.shader = ddgi_shader.rt_ao_shader;
+					ddgi_shader.rt_ao_pipeline = RD::get_singleton()->raytracing_pipeline_create(Span<RD::PipelineShader>(&pipeline_shader, 1), Span<RD::PipelineShader>(&pipeline_shader, 1), Span<RD::HitGroup>(&hit_group, 1), 1);
+				}
+
+				if (ddgi_shader.rt_ao_pipeline.is_valid()) {
+					ddgi_shader.rt_ao_hit_sbt = RD::get_singleton()->hit_sbt_create(ddgi_shader.rt_ao_pipeline, 1);
+					ddgi_shader.rt_ao_hit_sbt_range = RD::get_singleton()->hit_sbt_range_alloc(ddgi_shader.rt_ao_hit_sbt, 1);
+					uint32_t hit_group_index = 0;
+					RD::get_singleton()->hit_sbt_range_update(ddgi_shader.rt_ao_hit_sbt, ddgi_shader.rt_ao_hit_sbt_range, 0, Span<uint32_t>(&hit_group_index, 1));
+				}
+			}
+
 			ddgi_shader.available = true;
 		}
 	}
@@ -3961,6 +3985,15 @@ void GI::free() {
 	if (ddgi_shader.reflections_version.is_valid()) {
 		ddgi_shader.reflections.version_free(ddgi_shader.reflections_version);
 	}
+	if (ddgi_shader.rt_ao_hit_sbt.is_valid()) {
+		RD::get_singleton()->free_rid(ddgi_shader.rt_ao_hit_sbt);
+	}
+	if (ddgi_shader.rt_ao_pipeline.is_valid()) {
+		RD::get_singleton()->free_rid(ddgi_shader.rt_ao_pipeline);
+	}
+	if (ddgi_shader.rt_ao_version.is_valid()) {
+		ddgi_shader.rt_ao.version_free(ddgi_shader.rt_ao_version);
+	}
 }
 
 Ref<GI::SDFGI> GI::create_sdfgi(RID p_env, const Vector3 &p_world_position, uint32_t p_requested_history_size) {
@@ -4008,6 +4041,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		lights_buffer = RD::get_singleton()->storage_buffer_create(sizeof(Light) * MAX_LIGHTS);
 		for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
 			reflections_params_ubo[v] = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 8);
+			rt_ao_params_ubo[v] = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 8);
 		}
 		buffers_created = true;
 	}
@@ -4966,7 +5000,8 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, volume_ubo),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, ray_data_tex),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, distance_tex),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, probe_data_tex));
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, probe_data_tex),
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, probe_change_tex));
 
 	RID probe_update_set = UniformSetCacheRD::get_singleton()->get_cache(gi->ddgi_shader.probe_update.version_get_shader(gi->ddgi_shader.probe_update_version, DDGIShader::PROBE_UPDATE_MODE_RELOCATE), 0,
 			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, volume_ubo),
@@ -4978,6 +5013,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->ddgi_shader.blend_pipelines[DDGIShader::BLEND_MODE_IRRADIANCE]);
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, blend_irradiance_set, 0);
 	RD::get_singleton()->compute_list_dispatch(compute_list, probe_counts.x, probe_counts.z, probe_counts.y);
+	RD::get_singleton()->compute_list_add_barrier(compute_list);
 
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->ddgi_shader.blend_pipelines[DDGIShader::BLEND_MODE_DISTANCE]);
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, blend_distance_set, 0);
@@ -5157,6 +5193,10 @@ void GI::DDGI::free_data() {
 		if (reflections_params_ubo[v].is_valid()) {
 			RD::get_singleton()->free_rid(reflections_params_ubo[v]);
 			reflections_params_ubo[v] = RID();
+		}
+		if (rt_ao_params_ubo[v].is_valid()) {
+			RD::get_singleton()->free_rid(rt_ao_params_ubo[v]);
+			rt_ao_params_ubo[v] = RID();
 		}
 	}
 	if (instance_buffer.is_valid()) {
@@ -5484,6 +5524,92 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 		RD::get_singleton()->buffer_update(rbgi->scene_data_ubo, 0, sizeof(SceneData), &scene_data);
 	}
 
+	bool rt_ao_active = false;
+	StringName rt_ao_current_tex = RB_TEX_RT_AO;
+	bool rt_ao_first_frame = !rbgi->rt_ao_history_valid;
+	bool rt_ao_enabled = p_environment.is_valid() && RendererSceneRenderRD::get_singleton()->environment_get_ddgi_rt_ao_enabled(p_environment);
+	// RTAO: trace short rays for sub-probe-spacing occlusion that DDGI
+	// probes can't resolve. Must run before the GI apply so the AO texture
+	// is available when ddgi_process multiplies the ambient.
+	if (p_render_buffers->has_custom_data(RB_SCOPE_DDGI) && ddgi_shader.rt_ao_pipeline.is_valid() && rt_ao_enabled) {
+		Ref<DDGI> ddgi_ao = p_render_buffers->get_custom_data(RB_SCOPE_DDGI);
+		if (ddgi_ao->tlas.is_valid()) {
+			Size2i ao_size = internal_size;
+			ao_size.x >>= 1;
+			ao_size.y >>= 1;
+
+			// Create both ping-pong textures (current + history) on first use.
+			// Clear to white (AO=1.0 = no occlusion) so the temporal blend
+			// starts from a neutral state.
+			for (const StringName &tex_name : {RB_TEX_RT_AO, RB_TEX_RT_AO_HISTORY}) {
+				if (!p_render_buffers->has_texture(RB_SCOPE_GI, tex_name)) {
+					p_render_buffers->create_texture(RB_SCOPE_GI, tex_name,
+							RD::DATA_FORMAT_R16_SFLOAT,
+						RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT,
+							RD::TEXTURE_SAMPLES_1, ao_size);
+					for (uint32_t cv = 0; cv < p_view_count; cv++) {
+						RD::get_singleton()->texture_clear(p_render_buffers->get_texture_slice(RB_SCOPE_GI, tex_name, cv, 0), Color(1, 1, 1, 1), 0, 1, 0, 1);
+					}
+				}
+			}
+
+			// Ping-pong: even frames write to RT_AO, odd to RT_AO_HISTORY.
+			bool even_frame = (ddgi_ao->frame % 2) == 0;
+			rt_ao_current_tex = even_frame ? RB_TEX_RT_AO : RB_TEX_RT_AO_HISTORY;
+			StringName rt_ao_history_tex = even_frame ? RB_TEX_RT_AO_HISTORY : RB_TEX_RT_AO;
+
+			RID linear_sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			float env_radius = p_environment.is_valid() ? RendererSceneRenderRD::get_singleton()->environment_get_ddgi_rt_ao_radius(p_environment) : 0.0f;
+			float ray_radius = MAX(0.01f, env_radius > 0.0f ? env_radius : ddgi_ao->probe_spacing.x * 0.5f);
+
+			struct RtAoParams {
+				uint32_t view_index;
+				uint32_t half_res;
+				uint32_t orthogonal;
+				float ray_radius;
+				float ray_bias;
+				float intensity;
+				float frame_rand;
+				float blend_factor;
+			};
+
+			for (uint32_t v = 0; v < p_view_count; v++) {
+				RtAoParams params = {};
+				params.view_index = v;
+				params.half_res = 1;
+				params.orthogonal = p_projections[0].is_orthogonal() ? 1 : 0;
+				params.ray_radius = ray_radius;
+				params.ray_bias = 0.01f;
+				params.intensity = p_environment.is_valid() ? RendererSceneRenderRD::get_singleton()->environment_get_ddgi_rt_ao_intensity(p_environment) : 1.0f;
+				params.frame_rand = float(ddgi_ao->frame % 256) / 256.0f;
+				params.blend_factor = rt_ao_first_frame ? 1.0f : 0.15f;
+
+				RD::get_singleton()->buffer_update(ddgi_ao->rt_ao_params_ubo[v], 0, sizeof(RtAoParams), &params);
+
+				RID current_slice = p_render_buffers->get_texture_slice(RB_SCOPE_GI, rt_ao_current_tex, v, 0);
+				RID history_slice = p_render_buffers->get_texture_slice(RB_SCOPE_GI, rt_ao_history_tex, v, 0);
+
+				RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(ddgi_shader.rt_ao_shader, 0,
+						RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, ddgi_ao->tlas),
+						RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 7, linear_sampler),
+						RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 10, rbgi->scene_data_ubo),
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 11, p_render_buffers->get_depth_texture(v)),
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 12, p_normal_roughness_slices[v]),
+						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, current_slice),
+						RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 14, ddgi_ao->rt_ao_params_ubo[v]),
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 15, history_slice));
+
+				RD::RaytracingListID raytracing_list = RD::get_singleton()->raytracing_list_begin();
+				RD::get_singleton()->raytracing_list_bind_raytracing_pipeline(raytracing_list, ddgi_shader.rt_ao_pipeline);
+				RD::get_singleton()->raytracing_list_bind_uniform_set(raytracing_list, uniform_set, 0);
+				RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, ddgi_shader.rt_ao_hit_sbt, ao_size.x, ao_size.y, 1);
+				RD::get_singleton()->raytracing_list_end();
+			}
+			rt_ao_active = true;
+		}
+	}
+	rbgi->rt_ao_history_valid = rt_ao_active;
+
 	// Now compute the contents of our buffers.
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
@@ -5749,7 +5875,8 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, use_ddgi ? ddgi->irradiance_tex : default_ddgi_rgba16f_tex),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, use_ddgi ? ddgi->distance_tex : default_ddgi_rg16f_tex),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, use_ddgi ? ddgi->probe_data_tex : default_ddgi_rgba16f_tex),
-				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 3, use_ddgi ? ddgi->volume_ubo : default_ddgi_ubo));
+				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 3, use_ddgi ? ddgi->volume_ubo : default_ddgi_ubo),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 4, (use_ddgi && rt_ao_active) ? p_render_buffers->get_texture_slice(RB_SCOPE_GI, rt_ao_current_tex, v, 0) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE)));
 
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[pipeline_specialization][mode].get_rid());
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, rbgi->uniform_set[v], 0);

@@ -883,6 +883,7 @@ public:
 
 	FUNC11(environment_set_sdfgi, RID, bool, int, float, RSE::EnvironmentSDFGIYScale, bool, float, bool, float, float, float)
 	FUNC13(environment_set_ddgi, RID, bool, const Vector3i &, const Vector3 &, int, float, float, float, bool, bool, float, bool, float)
+	FUNC4(environment_set_ddgi_rt_ao, RID, bool, float, float)
 	FUNC1(environment_set_sdfgi_ray_count, RSE::EnvironmentSDFGIRayCount)
 	FUNC1(environment_set_sdfgi_frames_to_converge, RSE::EnvironmentSDFGIFramesToConverge)
 	FUNC1(environment_set_sdfgi_frames_to_update_light, RSE::EnvironmentSDFGIFramesToUpdateLight)

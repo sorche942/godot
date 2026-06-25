@@ -38,11 +38,16 @@ layout(rg16f, set = 0, binding = 2) uniform restrict coherent image2DArray outpu
 
 layout(rgba16f, set = 0, binding = 3) uniform restrict readonly image2DArray probe_data;
 
+// Per-probe mean pending change (r) and brightness (g) from last frame.
+// Read by both irradiance and distance paths: irradiance uses it for its
+// own probe-coherent unfreeze; distance uses it as a proxy for geometry
+// movement (which shifts both irradiance and visibility together), making
+// distance unfreeze probe-coherent without a separate workgroup reduction.
+layout(rg16f, set = 0, binding = 5) uniform restrict coherent image2DArray probe_change;
+
 #ifdef MODE_IRRADIANCE
 // Low-hysteresis atlas feeding the infinite-bounce loop (see gi.h).
 layout(rgba16f, set = 0, binding = 4) uniform restrict coherent image2DArray fast_output_texture;
-// Per-probe mean pending change (r) and brightness (g) from last frame.
-layout(rg16f, set = 0, binding = 5) uniform restrict coherent image2DArray probe_change;
 
 // Probe-wide reduction of the pending change: real lighting changes are
 // coherent across a probe's texels while noise is independent per texel, so
@@ -300,7 +305,7 @@ void main() {
 					// A real change drives both statistics in the same direction;
 					// noise only agrees half the time.
 					float sign_agreement = (signed_gap * change_ema > 0.0) ? 1.0 : 0.0;
-					float change_evidence = ema_evidence * gap_evidence * sign_agreement;
+					float per_texel_evidence = ema_evidence * gap_evidence * sign_agreement;
 
 					// Probe-coherent pending change (previous frame's reduction):
 					// unfreezes and accelerates the whole probe through the slow
@@ -311,12 +316,15 @@ void main() {
 					vec2 probe_stat = imageLoad(probe_change, storage_coords).rg;
 					float probe_rel_gap = abs(probe_stat.r) / max(0.05, probe_stat.g);
 					float probe_evidence = smoothstep(0.02, 0.06, probe_rel_gap);
-					change_evidence = max(change_evidence, probe_evidence);
+					float change_evidence = max(per_texel_evidence, probe_evidence);
 
 					float convergence = 1.0 - change_evidence;
-					// Strong agreement proves the change is real and substantial;
-					// blend much faster to collapse the convergence tail.
-					float consistency = change_evidence * max(smoothstep(convergence_knee, convergence_knee * 4.0, abs(change_ema)), probe_evidence);
+					// Consistency: take the max of per-texel and probe-level signals.
+					// The product (old form) squared the probe evidence for texels
+					// whose own statistics were neutral, causing them to lag behind
+					// texels that were directly changing — a speckled unfreeze.
+					// Taking the max makes probe-wide unfreeze coherent.
+					float consistency = max(per_texel_evidence * smoothstep(convergence_knee, convergence_knee * 4.0, abs(change_ema)), probe_evidence);
 
 					if (!probe_reset) {
 						if (max_component(previous - result.rgb) > ddgi.data.irradiance_threshold) {
@@ -368,10 +376,63 @@ void main() {
 					// Alpha 0 is reserved as the cleared marker.
 					result = vec4(previous + lerp_delta, clamp(change_ema + 0.5, 1.0 / 255.0, 1.0));
 #else
+				{
+					// Distance convergence: freeze stable texels to eliminate
+					// Chebyshev weight shimmer. The irradiance convergence system
+					// (fast atlas, dual-statistic EMA, probe_change_tex) can't be
+					// reused — distance is rg16f (no spare channel for an EMA),
+					// has no fast atlas, and a different noise profile. Instead,
+					// per-texel mean and variance deltas (normalized by probe
+					// spacing for scene independence) separate R3 ray-rotation
+					// noise (small, zero-mean) from real visibility changes.
+					float inv_s = 1.0 / length(ddgi.data.probe_spacing);
+					float inv_s_sq = inv_s * inv_s;
+
+					// Mean distance change.
+					float delta_mean = abs(result.r - previous.r) * inv_s;
+					float mean_knee = max(0.02, 0.02 * abs(previous.r) * inv_s);
+					float mean_evidence = smoothstep(mean_knee * 0.5, mean_knee * 3.0, delta_mean);
+
+					// Variance change: occluder appearance/disappearance shifts
+					// variance even when the mean is stable. Compute actual
+					// variance (E[d^2]-E[d]^2) rather than comparing raw .g
+					// (which stores E[d^2] and is scale-biased).
+					float var_prev = max(0.0, previous.g - previous.r * previous.r);
+					float var_new = max(0.0, result.g - result.r * result.r);
+					float delta_var = abs(var_new - var_prev) * inv_s_sq;
+					float var_knee = max(0.005, 0.02 * var_prev * inv_s_sq);
+					float var_evidence = smoothstep(var_knee * 0.5, var_knee * 3.0, delta_var);
+
+					float change_evidence = max(mean_evidence, var_evidence);
+
+					// Probe-level signal from the irradiance pass: catches geometry
+					// changes that shift both irradiance and visibility together,
+					// and makes the distance unfreeze probe-coherent (all texels
+					// respond together rather than speckling).
+					vec2 probe_stat = imageLoad(probe_change, storage_coords).rg;
+					float probe_rel_gap = abs(probe_stat.r) / max(0.05, probe_stat.g);
+					float probe_evidence = smoothstep(0.02, 0.06, probe_rel_gap);
+					change_evidence = max(change_evidence, probe_evidence);
+
+					float convergence = 1.0 - change_evidence;
+
+					// Responsive when changing, frozen when stable.
+					hysteresis = mix(hysteresis, 0.9, change_evidence);
+					hysteresis = mix(hysteresis, 1.0, convergence);
+
+					// Motion and scroll override the freeze: slow object motion
+					// can accumulate under the per-texel threshold then jump, so
+					// force responsive blending whenever the probe is in a motion
+					// region or was scroll-cleared.
 					if (probe_in_motion) {
 						hysteresis = min(hysteresis, 0.9);
 					}
+					if (probe_reset) {
+						hysteresis = 0.0;
+					}
+
 					result = vec4(mix(result.rg, previous.rg, hysteresis), 0.0, 1.0);
+				}
 #endif
 
 					imageStore(output_texture, thread_coords, result);

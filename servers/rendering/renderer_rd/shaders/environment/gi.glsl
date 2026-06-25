@@ -133,6 +133,7 @@ layout(set = 1, binding = 3, std140) uniform DDGIVolume {
 	DDGIVolumeData data;
 }
 ddgi;
+layout(set = 1, binding = 4) uniform texture2D ddgi_rt_ao_texture;
 
 layout(push_constant, std430) uniform Params {
 	uint max_voxel_gi_instances;
@@ -795,6 +796,13 @@ void main() {
 	if (sc_half_res) {
 		pos >>= 1;
 	}
+
+#ifdef USE_DDGI
+	// Apply RTAO: multiply ambient by the ray-traced occlusion factor.
+	vec2 ao_uv = (vec2(pos) + 0.5) / vec2(imageSize(ambient_buffer));
+	float rt_ao = textureLod(sampler2D(ddgi_rt_ao_texture, linear_sampler), ao_uv, 0.0).r;
+	ambient_light.rgb *= rt_ao;
+#endif
 
 	imageStore(ambient_buffer, pos, ambient_light);
 	imageStore(reflection_buffer, pos, reflection_light);

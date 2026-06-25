@@ -256,8 +256,12 @@ vec3 ddgi_surface_bias(vec3 surface_normal, vec3 camera_direction, DDGIVolumeDat
 	return (surface_normal * volume.probe_normal_bias) + (-camera_direction * volume.probe_view_bias);
 }
 
-// Blend weight in [0, 1]: 1 inside the volume, fading out over one probe
-// spacing outside of it.
+// Blend weight in [0, 1]: 1 inside the volume, fading out over
+// DDGI_EDGE_FADE_SPACINGS probe spacings outside of it. Wider than the
+// original 1-spacing fade to soften the hard boundary sweep when the grid
+// scrolls. The outer probes have less-converged data, so the fade shouldn't
+// be too wide — 3 spacings is a good balance for single-grid volumes.
+#define DDGI_EDGE_FADE_SPACINGS 3.0
 float ddgi_volume_blend_weight(vec3 world_position, DDGIVolumeData volume) {
 	vec3 origin = volume.origin + (vec3(volume.probe_scroll_offsets) * volume.probe_spacing);
 	vec3 extent = (volume.probe_spacing * vec3(volume.probe_counts - ivec3(1))) * 0.5;
@@ -267,10 +271,11 @@ float ddgi_volume_blend_weight(vec3 world_position, DDGIVolumeData volume) {
 		return 1.0;
 	}
 
+	vec3 fade_extent = volume.probe_spacing * DDGI_EDGE_FADE_SPACINGS;
 	float weight = 1.0;
-	weight *= (1.0 - clamp(delta.x / volume.probe_spacing.x, 0.0, 1.0));
-	weight *= (1.0 - clamp(delta.y / volume.probe_spacing.y, 0.0, 1.0));
-	weight *= (1.0 - clamp(delta.z / volume.probe_spacing.z, 0.0, 1.0));
+	weight *= (1.0 - clamp(delta.x / fade_extent.x, 0.0, 1.0));
+	weight *= (1.0 - clamp(delta.y / fade_extent.y, 0.0, 1.0));
+	weight *= (1.0 - clamp(delta.z / fade_extent.z, 0.0, 1.0));
 	return weight;
 }
 

@@ -3080,6 +3080,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_fog_depth", "env", "curve", "begin", "end"), &RenderingServer::environment_set_fog_depth);
 	ClassDB::bind_method(D_METHOD("environment_set_sdfgi", "env", "enable", "cascades", "min_cell_size", "y_scale", "use_occlusion", "bounce_feedback", "read_sky", "energy", "normal_bias", "probe_bias"), &RenderingServer::environment_set_sdfgi);
 	ClassDB::bind_method(D_METHOD("environment_set_ddgi", "env", "enable", "probe_counts", "probe_spacing", "rays_per_probe", "energy", "normal_bias", "view_bias", "probe_relocation", "probe_classification", "min_frontface_distance", "reflections", "reflections_max_roughness"), &RenderingServer::environment_set_ddgi);
+	ClassDB::bind_method(D_METHOD("environment_set_ddgi_rt_ao", "env", "enabled", "radius", "intensity"), &RenderingServer::environment_set_ddgi_rt_ao);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog", "env", "enable", "density", "albedo", "emission", "emission_energy", "anisotropy", "length", "detail_spread", "gi_inject", "temporal_reprojection", "temporal_reprojection_amount", "ambient_inject", "sky_affect"), &RenderingServer::environment_set_volumetric_fog);
 
 	ClassDB::bind_method(D_METHOD("environment_glow_set_use_bicubic_upscale", "enable"), &RenderingServer::environment_glow_set_use_bicubic_upscale);
