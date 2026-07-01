@@ -4928,13 +4928,15 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 		ubo.light_count = light_count;
 
 		// Lets the apply pass skip computing probe glossy where the RT
-		// reflections pass fully overwrites it (its fade starts at 0.7x).
+		// reflections pass fully overwrites it. The RT pass starts fading at
+		// half the configured cutoff so roughness maps do not become a narrow
+		// color ramp between mirror rays and probe glossy.
 		use_rt_reflections = environment.is_valid() && scene_render->environment_get_ddgi_reflections(environment);
 		rt_reflections_max_roughness = environment.is_valid() ? scene_render->environment_get_ddgi_reflections_max_roughness(environment) : 0.6f;
 		if (use_rt_reflections) {
 			ubo.flags |= FLAG_RT_REFLECTIONS;
 		}
-		ubo.rt_reflections_fade_start = rt_reflections_max_roughness * 0.7f;
+		ubo.rt_reflections_fade_start = rt_reflections_max_roughness * 0.5f;
 
 		ubo.motion_region_count = int32_t(MIN(motion_regions.size(), 8u));
 		for (int32_t r = 0; r < ubo.motion_region_count; r++) {

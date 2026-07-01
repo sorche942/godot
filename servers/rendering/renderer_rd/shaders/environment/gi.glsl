@@ -527,26 +527,30 @@ void ddgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, ou
 	vec3 ambient = irradiance * (ddgi.data.energy / DDGI_PI);
 	ambient_light = vec4(ambient, blend);
 
-	// Glossy support: for rough reflections, sample the irradiance field along
-	// the reflection vector. Smooth reflections are left to reflection
-	// probes/SSR (alpha ramps down so they take over).
-	float glossy_blend = clamp((roughness - 0.2) * 1.25, 0.0, 1.0);
+	// Glossy support: sample the irradiance field with the same roughness-shaped
+	// direction used by reflection probes. This keeps roughness maps from
+	// turning into a hard mask between sharp IBL/reflection results and DDGI's
+	// low-frequency probe glossy.
+	float glossy_blend = smoothstep(0.25, 0.85, roughness);
 	if (glossy_blend > 0.0) {
 		// The RT reflections pass fully overwrites the buffer below its fade
 		// start: computing probe glossy there is wasted work.
 		if ((ddgi.data.flags & DDGI_FLAG_RT_REFLECTIONS) != 0 && roughness < ddgi.data.rt_reflections_fade_start) {
 			return;
 		}
+		float roughness2 = roughness * roughness;
+		vec3 glossy_direction = normalize(mix(reflection, normal, roughness2 * roughness2));
+
 		// Very rough specular lobes are nearly hemispherical, so the already
 		// sampled diffuse irradiance approximates them; blending into it saves
 		// the second field sample on rough materials (most of a typical frame).
-		float approx_weight = smoothstep(0.6, 0.75, roughness);
+		float approx_weight = smoothstep(0.55, 0.85, roughness);
 		vec3 glossy_irradiance = irradiance;
 		if (approx_weight < 1.0) {
-			vec3 sampled = ddgi_sample_irradiance(world_position, surface_bias, reflection, vertex, ddgi.data);
+			vec3 sampled = ddgi_sample_irradiance(world_position, surface_bias, glossy_direction, vertex, ddgi.data);
 			glossy_irradiance = mix(sampled, irradiance, approx_weight);
 		}
-		vec3 glossy = glossy_irradiance * (ddgi.data.energy / DDGI_2PI);
+		vec3 glossy = glossy_irradiance * (ddgi.data.energy / DDGI_PI);
 		reflection_light = vec4(glossy, blend * glossy_blend);
 	}
 }

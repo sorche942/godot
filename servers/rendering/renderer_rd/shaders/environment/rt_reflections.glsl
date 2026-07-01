@@ -229,15 +229,22 @@ vec3 evaluate_direct_light(vec3 position, vec3 normal, uint shaded_instance, vec
 	return light_accum;
 }
 
+#define RT_REFLECTION_ROUGHNESS_MAX_LOD 5.0
+
 vec3 sample_sky(vec3 direction, float lod) {
 	vec3 sky_radiance = ddgi.data.sky_color;
 	if (ddgi.data.sky_mode != DDGI_SKY_MODE_COLOR) {
 		// sky_color.xy holds the octmap border size in sky modes.
 		vec2 sky_uv = vec3_to_oct_with_border(direction, ddgi.data.sky_color.xy);
+		float sky_lod = clamp(lod, 0.0, RT_REFLECTION_ROUGHNESS_MAX_LOD);
 		if (ddgi.data.sky_mode == DDGI_SKY_MODE_SKY_ARRAY) {
-			sky_radiance = textureLod(sampler2DArray(sky_texture_array, linear_sampler), vec3(sky_uv, lod), 0.0).rgb;
+			float lod_floor = floor(sky_lod);
+			float lod_blend = sky_lod - lod_floor;
+			vec3 sky_a = textureLod(sampler2DArray(sky_texture_array, linear_sampler), vec3(sky_uv, lod_floor), 0.0).rgb;
+			vec3 sky_b = textureLod(sampler2DArray(sky_texture_array, linear_sampler), vec3(sky_uv, min(lod_floor + 1.0, RT_REFLECTION_ROUGHNESS_MAX_LOD)), 0.0).rgb;
+			sky_radiance = mix(sky_a, sky_b, lod_blend);
 		} else {
-			sky_radiance = textureLod(sampler2D(sky_texture, linear_sampler), sky_uv, lod).rgb;
+			sky_radiance = textureLod(sampler2D(sky_texture, linear_sampler), sky_uv, sky_lod).rgb;
 		}
 	}
 	return sky_radiance * ddgi.data.sky_energy;
@@ -343,8 +350,8 @@ void main() {
 
 	vec3 radiance;
 	if (payload.hit_t >= 1e27) {
-		// Sharp sky for mirror reflections.
-		radiance = sample_sky(reflect_dir, 0.0);
+		// Use the same roughness-to-LOD convention as forward sky/reflection sampling.
+		radiance = sample_sky(reflect_dir, sqrt(roughness) * RT_REFLECTION_ROUGHNESS_MAX_LOD);
 	} else if (payload.hit_t < 0.0) {
 		// Backface: inside geometry, return no reflection.
 		radiance = vec3(0.0);
@@ -451,8 +458,11 @@ void main() {
 	}
 
 	// Fade towards the existing probe based glossy result as roughness
-	// approaches the cutoff so the transition is seamless.
-	float fade = smoothstep(params.max_roughness * 0.7, params.max_roughness, roughness);
+	// approaches the cutoff. A wide smootherstep ramp hides roughness-map
+	// islands when mirror rays and low-frequency DDGI probe glossy differ.
+	float fade_width = max(params.max_roughness - ddgi.data.rt_reflections_fade_start, 0.0001);
+	float fade_t = clamp((roughness - ddgi.data.rt_reflections_fade_start) / fade_width, 0.0, 1.0);
+	float fade = fade_t * fade_t * fade_t * (fade_t * (fade_t * 6.0 - 15.0) + 10.0);
 	vec4 previous = imageLoad(reflection_buffer, pixel);
 	vec3 rgb = mix(radiance, previous.rgb, fade);
 	float alpha = mix(1.0, previous.a, fade);
