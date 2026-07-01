@@ -106,7 +106,9 @@ void main() {
 
 	// The storage index of the probe this workgroup processes.
 	// Workgroups are dispatched as (probe_counts.x, probe_counts.z, probe_counts.y).
-	int probe_index = group_id.x + (group_id.y * ddgi.data.probe_counts.x) + (group_id.z * ddgi_probes_per_plane(ddgi.data));
+	int cascade_index = group_id.z / ddgi.data.probe_counts.y;
+	int cascade_group_z = group_id.z % ddgi.data.probe_counts.y;
+	int probe_index = group_id.x + (group_id.y * ddgi.data.probe_counts.x) + (cascade_group_z * ddgi_probes_per_plane(ddgi.data));
 
 	int num_probes = ddgi.data.probe_counts.x * ddgi.data.probe_counts.y * ddgi.data.probe_counts.z;
 	if (probe_index >= num_probes || probe_index < 0) {
@@ -127,10 +129,11 @@ void main() {
 	bool probe_in_motion = false;
 	if (ddgi.data.motion_region_count > 0) {
 		ivec3 storage_grid_coords = ddgi_probe_coords(probe_index, ddgi.data);
-		ivec3 spatial_coords = ((storage_grid_coords - ddgi.data.probe_scroll_offsets) % ddgi.data.probe_counts + ddgi.data.probe_counts) % ddgi.data.probe_counts;
-		vec3 probe_world = ddgi_probe_world_position_base(spatial_coords, ddgi.data);
+		ivec3 cascade_scroll = ddgi_cascade_scroll_offsets(cascade_index, ddgi.data);
+		ivec3 spatial_coords = ((storage_grid_coords - cascade_scroll) % ddgi.data.probe_counts + ddgi.data.probe_counts) % ddgi.data.probe_counts;
+		vec3 probe_world = ddgi_probe_world_position_base_cascade(spatial_coords, cascade_index, ddgi.data);
 		if ((ddgi.data.flags & DDGI_FLAG_PROBE_RELOCATION) != 0) {
-			probe_world += imageLoad(probe_data, ddgi_probe_texel_coords(probe_index, ddgi.data)).xyz * ddgi.data.probe_spacing;
+			probe_world += imageLoad(probe_data, ddgi_probe_texel_coords_cascade(probe_index, cascade_index, ddgi.data)).xyz * ddgi_cascade_spacing(cascade_index, ddgi.data);
 		}
 		for (int r = 0; r < ddgi.data.motion_region_count; r++) {
 			if (all(greaterThanEqual(probe_world, ddgi.data.motion_region_min[r].xyz)) && all(lessThanEqual(probe_world, ddgi.data.motion_region_max[r].xyz))) {
@@ -140,12 +143,12 @@ void main() {
 		}
 	}
 
-	ivec3 storage_coords = ddgi_probe_texel_coords(probe_index, ddgi.data);
+	ivec3 storage_coords = ddgi_probe_texel_coords_cascade(probe_index, cascade_index, ddgi.data);
 
 	// Per-probe (workgroup-uniform) early conditions, hoisted out of the
 	// border-texel divergence so the cooperative loop's barriers stay in
 	// uniform control flow.
-	bool scroll_cleared = ddgi_probe_scroll_cleared(storage_coords, ddgi.data);
+	bool scroll_cleared = ddgi_probe_scroll_cleared_cascade(storage_coords, cascade_index, ddgi.data);
 	bool use_classification = (ddgi.data.flags & DDGI_FLAG_PROBE_CLASSIFICATION) != 0;
 	// Scroll-cleared probes may inherit a stale INACTIVE state from the
 	// previous occupant of their toroidal storage slot. Force active.
@@ -178,7 +181,7 @@ void main() {
 			int load_index = chunk_start + int(gl_LocalInvocationIndex);
 			if (load_index < ddgi.data.probe_ray_count) {
 				s_ray_dir_cache[gl_LocalInvocationIndex] = ddgi_probe_ray_direction(load_index, ddgi.data);
-				s_ray_sample_cache[gl_LocalInvocationIndex] = imageLoad(ray_data, ddgi_ray_data_texel_coords(load_index, probe_index, ddgi.data));
+				s_ray_sample_cache[gl_LocalInvocationIndex] = imageLoad(ray_data, ddgi_ray_data_texel_coords_cascade(load_index, probe_index, cascade_index, ddgi.data));
 			}
 			barrier();
 
@@ -240,7 +243,7 @@ void main() {
 
 					// Scroll-cleared probes: the old storage value is from the opposite
 					// side of the toroidal grid (the slot wrapped around), so it cannot
-					// seed the blend. The trace already ran for these probes — snap to
+					// seed the blend. The trace already ran for these probes -- snap to
 					// the fresh estimate instead of publishing black or ghosting the
 					// stale value.
 #ifdef MODE_IRRADIANCE
@@ -322,7 +325,7 @@ void main() {
 					// Consistency: take the max of per-texel and probe-level signals.
 					// The product (old form) squared the probe evidence for texels
 					// whose own statistics were neutral, causing them to lag behind
-					// texels that were directly changing — a speckled unfreeze.
+					// texels that were directly changing -- a speckled unfreeze.
 					// Taking the max makes probe-wide unfreeze coherent.
 					float consistency = max(per_texel_evidence * smoothstep(convergence_knee, convergence_knee * 4.0, abs(change_ema)), probe_evidence);
 
@@ -353,7 +356,7 @@ void main() {
 					hysteresis = mix(hysteresis, 1.0, convergence);
 					// Probe reset overrides the convergence freeze: the stale storage
 					// value makes the change statistics (EMA, fast-vs-display gap)
-					// meaningless — they compare two values from the wrong side of the
+					// meaningless -- they compare two values from the wrong side of the
 					// toroidal grid. Snap to the fresh trace estimate unconditionally.
 					if (probe_reset) {
 						hysteresis = 0.0;
@@ -380,7 +383,7 @@ void main() {
 					// Distance convergence: freeze stable texels to eliminate
 					// Chebyshev weight shimmer. The irradiance convergence system
 					// (fast atlas, dual-statistic EMA, probe_change_tex) can't be
-					// reused — distance is rg16f (no spare channel for an EMA),
+					// reused -- distance is rg16f (no spare channel for an EMA),
 					// has no fast atlas, and a different noise profile. Instead,
 					// per-texel mean and variance deltas (normalized by probe
 					// spacing for scene independence) separate R3 ray-rotation
@@ -460,7 +463,7 @@ void main() {
 		float inv_texels = 1.0 / float(OCT_INTERIOR_TEXELS * OCT_INTERIOR_TEXELS);
 		float mean_gap = (float(s_gap_sum_fp) / PROBE_STAT_FP_SCALE) * inv_texels;
 		float mean_brightness = (float(s_brightness_sum_fp) / PROBE_STAT_FP_SCALE) * inv_texels;
-		ivec3 stat_coords = ddgi_probe_texel_coords(probe_index, ddgi.data);
+		ivec3 stat_coords = ddgi_probe_texel_coords_cascade(probe_index, cascade_index, ddgi.data);
 		// Temporal smoothing: low-amplitude ringing of the fast feedback loop
 		// is coherent but alternating, so a short EMA suppresses it while a
 		// genuine pending change persists through it.

@@ -25,21 +25,22 @@ layout(rgba32f, set = 0, binding = 1) uniform restrict readonly image2DArray ray
 layout(rgba16f, set = 0, binding = 2) uniform restrict image2DArray probe_data;
 
 void main() {
-	int probe_index = int(gl_GlobalInvocationID.x);
-
+	int full_probe_index = int(gl_GlobalInvocationID.x);
 	int num_probes = ddgi.data.probe_counts.x * ddgi.data.probe_counts.y * ddgi.data.probe_counts.z;
-	if (probe_index >= num_probes) {
+	int cascade_index = full_probe_index / num_probes;
+	int probe_index = full_probe_index % num_probes;
+	if (cascade_index >= ddgi.data.cascade_count) {
 		return;
 	}
 
-	ivec3 output_coords = ddgi_probe_texel_coords(probe_index, ddgi.data);
+	ivec3 output_coords = ddgi_probe_texel_coords_cascade(probe_index, cascade_index, ddgi.data);
 
 #ifdef MODE_RESET
 	imageStore(probe_data, output_coords, vec4(0.0, 0.0, 0.0, DDGI_PROBE_STATE_ACTIVE));
 #else
 
 	// Probes that scrolled to a new position start over.
-	if (ddgi_probe_scroll_cleared(output_coords, ddgi.data)) {
+	if (ddgi_probe_scroll_cleared_cascade(output_coords, cascade_index, ddgi.data)) {
 		imageStore(probe_data, output_coords, vec4(0.0, 0.0, 0.0, DDGI_PROBE_STATE_ACTIVE));
 		return;
 	}
@@ -59,7 +60,7 @@ void main() {
 	float backface_count = 0.0;
 
 	for (int ray_index = 0; ray_index < num_rays; ray_index++) {
-		ivec3 ray_coords = ddgi_ray_data_texel_coords(ray_index, probe_index, ddgi.data);
+		ivec3 ray_coords = ddgi_ray_data_texel_coords_cascade(ray_index, probe_index, cascade_index, ddgi.data);
 		float hit_distance = imageLoad(ray_data, ray_coords).w;
 
 		if (hit_distance < 0.0) {
@@ -122,7 +123,7 @@ void main() {
 	int backface_count = 0;
 
 	for (int ray_index = 0; ray_index < num_rays; ray_index++) {
-		ivec3 ray_coords = ddgi_ray_data_texel_coords(ray_index, probe_index, ddgi.data);
+		ivec3 ray_coords = ddgi_ray_data_texel_coords_cascade(ray_index, probe_index, cascade_index, ddgi.data);
 		backface_count += int(imageLoad(ray_data, ray_coords).w < 0.0);
 	}
 
@@ -142,7 +143,7 @@ void main() {
 	int scan_rays = was_inactive ? num_rays : ddgi.data.probe_ray_count;
 	bool geometry_in_voxel = false;
 	for (int ray_index = 0; ray_index < scan_rays; ray_index++) {
-		ivec3 ray_coords = ddgi_ray_data_texel_coords(ray_index, probe_index, ddgi.data);
+		ivec3 ray_coords = ddgi_ray_data_texel_coords_cascade(ray_index, probe_index, cascade_index, ddgi.data);
 		float hit_distance = imageLoad(ray_data, ray_coords).w;
 		if (hit_distance < 0.0) {
 			continue;
@@ -178,8 +179,9 @@ void main() {
 	if (ddgi.data.motion_region_count > 0) {
 		// Recover the probe's world position from its storage coordinates.
 		ivec3 storage_coords = ddgi_probe_coords(probe_index, ddgi.data);
-		ivec3 spatial_coords = ((storage_coords - ddgi.data.probe_scroll_offsets) % ddgi.data.probe_counts + ddgi.data.probe_counts) % ddgi.data.probe_counts;
-		vec3 probe_world = ddgi_probe_world_position_base(spatial_coords, ddgi.data) + current.xyz * ddgi.data.probe_spacing;
+		ivec3 cascade_scroll = ddgi_cascade_scroll_offsets(cascade_index, ddgi.data);
+		ivec3 spatial_coords = ((storage_coords - cascade_scroll) % ddgi.data.probe_counts + ddgi.data.probe_counts) % ddgi.data.probe_counts;
+		vec3 probe_world = ddgi_probe_world_position_base_cascade(spatial_coords, cascade_index, ddgi.data) + current.xyz * ddgi_cascade_spacing(cascade_index, ddgi.data);
 		for (int r = 0; r < ddgi.data.motion_region_count; r++) {
 			if (all(greaterThanEqual(probe_world, ddgi.data.motion_region_min[r].xyz)) && all(lessThanEqual(probe_world, ddgi.data.motion_region_max[r].xyz))) {
 				imageStore(probe_data, output_coords, vec4(current.xyz, DDGI_PROBE_STATE_ACTIVE));

@@ -521,7 +521,7 @@ void ddgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, ou
 	vec3 camera_direction = normalize(vertex);
 	vec3 surface_bias = ddgi_surface_bias(normal, camera_direction, ddgi.data);
 
-	vec3 irradiance = ddgi_sample_irradiance(world_position, surface_bias, normal, ddgi.data);
+	vec3 irradiance = ddgi_sample_irradiance(world_position, surface_bias, normal, vertex, ddgi.data);
 
 	// Godot multiplies the ambient buffer by albedo; 1/PI completes the Lambertian BRDF.
 	vec3 ambient = irradiance * (ddgi.data.energy / DDGI_PI);
@@ -543,7 +543,7 @@ void ddgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, ou
 		float approx_weight = smoothstep(0.6, 0.75, roughness);
 		vec3 glossy_irradiance = irradiance;
 		if (approx_weight < 1.0) {
-			vec3 sampled = ddgi_sample_irradiance(world_position, surface_bias, reflection, ddgi.data);
+			vec3 sampled = ddgi_sample_irradiance(world_position, surface_bias, reflection, vertex, ddgi.data);
 			glossy_irradiance = mix(sampled, irradiance, approx_weight);
 		}
 		vec3 glossy = glossy_irradiance * (ddgi.data.energy / DDGI_2PI);

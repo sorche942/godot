@@ -4046,6 +4046,13 @@ bool GI::DDGI::update_settings(RID p_env) {
 		buffers_created = true;
 	}
 
+	String cascade_env = OS::get_singleton()->get_environment("GODOT_DDGI_CASCADES");
+	int new_cascade_count = cascade_env.is_empty() ? 1 : CLAMP(cascade_env.to_int(), 1, MAX_CASCADES);
+	if (new_cascade_count != cascade_count) {
+		cascade_count = new_cascade_count;
+		buffers_created = true;
+	}
+
 	Vector3i new_probe_counts = scene_render->environment_get_ddgi_probe_counts(p_env);
 	new_probe_counts = new_probe_counts.clampi(2, 64);
 	Vector3 new_probe_spacing = scene_render->environment_get_ddgi_probe_spacing(p_env);
@@ -4089,7 +4096,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		tf.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
 		tf.width = rays_per_probe;
 		tf.height = get_probes_per_plane();
-		tf.array_layers = probe_counts.y;
+		tf.array_layers = probe_counts.y * cascade_count;
 		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		ray_data_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	}
@@ -4100,7 +4107,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		tf.width = probe_counts.x * (IRRADIANCE_OCT_SIZE + 2);
 		tf.height = probe_counts.z * (IRRADIANCE_OCT_SIZE + 2);
-		tf.array_layers = probe_counts.y;
+		tf.array_layers = probe_counts.y * cascade_count;
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		irradiance_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 		irradiance_fast_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
@@ -4112,7 +4119,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		tf.format = RD::DATA_FORMAT_R16G16_SFLOAT;
 		tf.width = probe_counts.x * (DISTANCE_OCT_SIZE + 2);
 		tf.height = probe_counts.z * (DISTANCE_OCT_SIZE + 2);
-		tf.array_layers = probe_counts.y;
+		tf.array_layers = probe_counts.y * cascade_count;
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		distance_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	}
@@ -4123,7 +4130,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		tf.width = probe_counts.x;
 		tf.height = probe_counts.z;
-		tf.array_layers = probe_counts.y;
+		tf.array_layers = probe_counts.y * cascade_count;
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		probe_data_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	}
@@ -4134,7 +4141,7 @@ bool GI::DDGI::update_settings(RID p_env) {
 		tf.format = RD::DATA_FORMAT_R16G16_SFLOAT;
 		tf.width = probe_counts.x;
 		tf.height = probe_counts.z;
-		tf.array_layers = probe_counts.y;
+		tf.array_layers = probe_counts.y * cascade_count;
 		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 		probe_change_tex = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	}
@@ -4144,21 +4151,36 @@ bool GI::DDGI::update_settings(RID p_env) {
 }
 
 void GI::DDGI::update_scroll(const Vector3 &p_world_position) {
+	// Cascade 0 (existing behavior).
 	Vector3i target;
 	target.x = int32_t(Math::round(p_world_position.x / probe_spacing.x));
 	target.y = int32_t(Math::round(p_world_position.y / probe_spacing.y));
 	target.z = int32_t(Math::round(p_world_position.z / probe_spacing.z));
-
 	scroll_delta += target - scroll_offsets;
 	scroll_offsets = target;
+
+	// Cascades 1..N: each scrolls at its own (larger) spacing.
+	for (int c = 1; c < cascade_count; c++) {
+		float r = Math::pow(cascade_spacing_ratio, float(c));
+		Vector3 c_spacing = probe_spacing * r;
+		Vector3i c_target;
+		c_target.x = int32_t(Math::round(p_world_position.x / c_spacing.x));
+		c_target.y = int32_t(Math::round(p_world_position.y / c_spacing.y));
+		c_target.z = int32_t(Math::round(p_world_position.z / c_spacing.z));
+		cascade_scroll_delta[c] += c_target - cascade_scroll_offsets[c];
+		cascade_scroll_offsets[c] = c_target;
+	}
 }
 
 AABB GI::DDGI::get_bounds() const {
+	// Use the outermost cascade's spacing for culling bounds: it covers
+	// the largest area, and geometry within its range is needed by all
+	// inner cascades too.
+	float outer_r = cascade_count > 1 ? Math::pow(cascade_spacing_ratio, float(cascade_count - 1)) : 1.0f;
+	Vector3 outer_spacing = probe_spacing * outer_r;
 	Vector3 center = Vector3(scroll_offsets) * probe_spacing;
-	Vector3 extents = probe_spacing * Vector3(probe_counts - Vector3i(1, 1, 1)) * 0.5;
-	// Geometry beyond the volume still occludes and bounces probe rays;
-	// include a generous margin when culling.
-	Vector3 margin = probe_spacing * Vector3(probe_counts) * 0.5;
+	Vector3 extents = outer_spacing * Vector3(probe_counts - Vector3i(1, 1, 1)) * 0.5;
+	Vector3 margin = outer_spacing * Vector3(probe_counts) * 0.5;
 	return AABB(center - extents - margin, (extents + margin) * 2.0);
 }
 
@@ -4230,6 +4252,36 @@ void GI::DDGI::fill_volume_ubo(VolumeDataUBO &r_ubo) const {
 
 	r_ubo.irradiance_threshold = 0.25;
 	r_ubo.brightness_threshold = 0.1;
+
+	// Cascade data.
+	r_ubo.cascade_count = cascade_count;
+	r_ubo.cascade_spacing_ratio = cascade_spacing_ratio;
+	// Cascade 0 mirrors the existing scroll_offsets/scroll_delta.
+	r_ubo.cascade_scroll_offsets[0][0] = scroll_offsets.x;
+	r_ubo.cascade_scroll_offsets[0][1] = scroll_offsets.y;
+	r_ubo.cascade_scroll_offsets[0][2] = scroll_offsets.z;
+	r_ubo.cascade_scroll_offsets[0][3] = 0;
+	r_ubo.cascade_scroll_delta[0][0] = scroll_delta.x;
+	r_ubo.cascade_scroll_delta[0][1] = scroll_delta.y;
+	r_ubo.cascade_scroll_delta[0][2] = scroll_delta.z;
+	r_ubo.cascade_scroll_delta[0][3] = 0;
+	for (int c = 1; c < DDGI::MAX_CASCADES; c++) {
+		if (c < cascade_count) {
+			r_ubo.cascade_scroll_offsets[c][0] = cascade_scroll_offsets[c].x;
+			r_ubo.cascade_scroll_offsets[c][1] = cascade_scroll_offsets[c].y;
+			r_ubo.cascade_scroll_offsets[c][2] = cascade_scroll_offsets[c].z;
+			r_ubo.cascade_scroll_delta[c][0] = cascade_scroll_delta[c].x;
+			r_ubo.cascade_scroll_delta[c][1] = cascade_scroll_delta[c].y;
+			r_ubo.cascade_scroll_delta[c][2] = cascade_scroll_delta[c].z;
+		} else {
+			for (int j = 0; j < 4; j++) {
+				r_ubo.cascade_scroll_offsets[c][j] = 0;
+				r_ubo.cascade_scroll_delta[c][j] = 0;
+			}
+		}
+		r_ubo.cascade_scroll_offsets[c][3] = 0;
+		r_ubo.cascade_scroll_delta[c][3] = 0;
+	}
 }
 
 // GPU/CPU profiler for the DDGI passes, enabled with GODOT_DDGI_PROFILE=1.
@@ -4982,7 +5034,17 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	RD::RaytracingListID raytracing_list = RD::get_singleton()->raytracing_list_begin();
 	RD::get_singleton()->raytracing_list_bind_raytracing_pipeline(raytracing_list, gi->ddgi_shader.trace_pipeline);
 	RD::get_singleton()->raytracing_list_bind_uniform_set(raytracing_list, trace_uniform_set, 0);
-	RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, gi->ddgi_shader.hit_sbt, rays_per_probe, get_probes_per_plane(), probe_counts.y);
+	// Temporal trace amortization: trace cascade 0 every frame, outer cascades
+	// on a 2^cascade frame pattern. The blend still processes all cascades
+	// every frame using slightly stale (previous-frame) trace data for skipped
+	// ones. This gives ~1.5x cost for 2 cascades instead of ~2x.
+	int cascades_to_trace = 1;
+	for (int c = 1; c < cascade_count; c++) {
+		if ((frame % (1u << c)) == 0) {
+			cascades_to_trace = c + 1;
+		}
+	}
+	RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, gi->ddgi_shader.hit_sbt, rays_per_probe, get_probes_per_plane(), probe_counts.y * cascades_to_trace);
 	RD::get_singleton()->raytracing_list_end();
 	ddgi_profiler.mark("ddgi/trace");
 
@@ -5012,25 +5074,25 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->ddgi_shader.blend_pipelines[DDGIShader::BLEND_MODE_IRRADIANCE]);
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, blend_irradiance_set, 0);
-	RD::get_singleton()->compute_list_dispatch(compute_list, probe_counts.x, probe_counts.z, probe_counts.y);
+	RD::get_singleton()->compute_list_dispatch(compute_list, probe_counts.x, probe_counts.z, probe_counts.y * cascade_count);
 	RD::get_singleton()->compute_list_add_barrier(compute_list);
 
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->ddgi_shader.blend_pipelines[DDGIShader::BLEND_MODE_DISTANCE]);
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, blend_distance_set, 0);
-	RD::get_singleton()->compute_list_dispatch(compute_list, probe_counts.x, probe_counts.z, probe_counts.y);
+	RD::get_singleton()->compute_list_dispatch(compute_list, probe_counts.x, probe_counts.z, probe_counts.y * cascade_count);
 
 	uint32_t probe_count = get_probe_count();
 
 	if (use_probe_relocation) {
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->ddgi_shader.probe_update_pipelines[DDGIShader::PROBE_UPDATE_MODE_RELOCATE]);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, probe_update_set, 0);
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count * cascade_count, 1, 1);
 	}
 
 	if (use_probe_classification) {
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->ddgi_shader.probe_update_pipelines[DDGIShader::PROBE_UPDATE_MODE_CLASSIFY]);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, probe_update_set, 0);
-		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count, 1, 1);
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, probe_count * cascade_count, 1, 1);
 	}
 
 	RD::get_singleton()->compute_list_end();
@@ -5041,6 +5103,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 
 	// The scroll delta has been applied to the textures.
 	scroll_delta = Vector3i();
+	for (int c = 1; c < cascade_count; c++) {
+		cascade_scroll_delta[c] = Vector3i();
+	}
 
 	pending_geometry_instances = nullptr;
 	pending_lights = nullptr;

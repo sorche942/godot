@@ -25,6 +25,8 @@
 #define DDGI_SKY_MODE_SKY_2D 1
 #define DDGI_SKY_MODE_SKY_ARRAY 2
 
+#define DDGI_MAX_CASCADES 4
+
 // Mirrors GI::DDGIVolumeDataUBO (std140).
 struct DDGIVolumeData {
 	vec3 probe_spacing;
@@ -70,6 +72,13 @@ struct DDGIVolumeData {
 	float rt_reflections_fade_start;
 	int motion_pad1;
 	int motion_pad2;
+
+	// Cascade data (mirrors VolumeDataUBO).
+	int cascade_count;
+	float cascade_spacing_ratio;
+	ivec2 cascade_ubo_pad;
+	ivec4 cascade_scroll_offsets[DDGI_MAX_CASCADES];
+	ivec4 cascade_scroll_delta[DDGI_MAX_CASCADES];
 };
 
 /* Quaternion helpers */
@@ -180,7 +189,7 @@ ivec3 ddgi_probe_texel_coords(int probe_index, DDGIVolumeData volume) {
 	int plane_index = probe_index / probes_per_plane;
 	int x = probe_index % volume.probe_counts.x;
 	int y = (probe_index / volume.probe_counts.x) % volume.probe_counts.z;
-	return ivec3(x, y, plane_index);
+	return ivec3(x, y, plane_index + volume.cascade_ubo_pad.x);
 }
 
 // Coordinates of a ray in the ray data texture, from a probe storage index.
@@ -190,6 +199,16 @@ ivec3 ddgi_ray_data_texel_coords(int ray_index, int probe_index, DDGIVolumeData 
 	coords.x = ray_index;
 	coords.z = probe_index / probes_per_plane;
 	coords.y = probe_index - (coords.z * probes_per_plane);
+	return coords;
+}
+
+// Cascade-aware version: adds cascade layer offset to Z.
+ivec3 ddgi_ray_data_texel_coords_cascade(int ray_index, int probe_index, int cascade_index, DDGIVolumeData volume) {
+	int probes_per_plane = ddgi_probes_per_plane(volume);
+	ivec3 coords;
+	coords.x = ray_index;
+	coords.z = probe_index / probes_per_plane + cascade_index * volume.probe_counts.y;
+	coords.y = probe_index - ((probe_index / probes_per_plane) * probes_per_plane);
 	return coords;
 }
 
@@ -250,6 +269,82 @@ bool ddgi_probe_scroll_cleared(ivec3 storage_coords, DDGIVolumeData volume) {
 	return false;
 }
 
+/* Cascade helpers -- per-cascade versions of the probe grid functions.
+   Cascade 0 mirrors the existing behavior (backward compatible). */
+
+vec3 ddgi_cascade_spacing(int cascade_index, DDGIVolumeData volume) {
+	return volume.probe_spacing * pow(volume.cascade_spacing_ratio, float(cascade_index));
+}
+
+ivec3 ddgi_cascade_scroll_offsets(int cascade_index, DDGIVolumeData volume) {
+	if (cascade_index == 0) {
+		return volume.probe_scroll_offsets;
+	}
+	return volume.cascade_scroll_offsets[cascade_index].xyz;
+}
+
+ivec3 ddgi_cascade_scroll_delta(int cascade_index, DDGIVolumeData volume) {
+	if (cascade_index == 0) {
+		return volume.scroll_delta;
+	}
+	return volume.cascade_scroll_delta[cascade_index].xyz;
+}
+
+ivec3 ddgi_probe_texel_coords_cascade(int probe_index, int cascade_index, DDGIVolumeData volume) {
+	int probes_per_plane = ddgi_probes_per_plane(volume);
+	int plane_index = probe_index / probes_per_plane;
+	int x = probe_index % volume.probe_counts.x;
+	int y = (probe_index / volume.probe_counts.x) % volume.probe_counts.z;
+	return ivec3(x, y, plane_index + cascade_index * volume.probe_counts.y);
+}
+
+int ddgi_scrolling_probe_index_cascade(ivec3 probe_coords, int cascade_index, DDGIVolumeData volume) {
+	ivec3 scroll = ddgi_cascade_scroll_offsets(cascade_index, volume);
+	return ddgi_probe_index(((probe_coords + scroll) % volume.probe_counts + volume.probe_counts) % volume.probe_counts, volume);
+}
+
+vec3 ddgi_probe_world_position_base_cascade(ivec3 probe_coords, int cascade_index, DDGIVolumeData volume) {
+	vec3 spacing = ddgi_cascade_spacing(cascade_index, volume);
+	ivec3 scroll = ddgi_cascade_scroll_offsets(cascade_index, volume);
+	vec3 grid_world_position = vec3(probe_coords) * spacing;
+	vec3 grid_shift = (spacing * vec3(volume.probe_counts - ivec3(1))) * 0.5;
+	return (grid_world_position - grid_shift) + volume.origin + (vec3(scroll) * spacing);
+}
+
+ivec3 ddgi_base_probe_coords_cascade(vec3 world_position, int cascade_index, DDGIVolumeData volume) {
+	vec3 spacing = ddgi_cascade_spacing(cascade_index, volume);
+	ivec3 scroll = ddgi_cascade_scroll_offsets(cascade_index, volume);
+	vec3 position = world_position - (volume.origin + vec3(scroll) * spacing);
+	position += (spacing * vec3(volume.probe_counts - ivec3(1))) * 0.5;
+	ivec3 probe_coords = ivec3(position / spacing);
+	return clamp(probe_coords, ivec3(0), volume.probe_counts - ivec3(1));
+}
+
+bool ddgi_probe_scroll_cleared_cascade(ivec3 storage_coords, int cascade_index, DDGIVolumeData volume) {
+	ivec3 delta = ddgi_cascade_scroll_delta(cascade_index, volume);
+	ivec3 scroll = ddgi_cascade_scroll_offsets(cascade_index, volume);
+	for (int axis = 0; axis < 3; axis++) {
+		int d = delta[axis];
+		if (d == 0) {
+			continue;
+		}
+		int n = volume.probe_counts[axis];
+		if (abs(d) >= n) {
+			return true;
+		}
+		int s = (axis == 0) ? storage_coords.x : ((axis == 1) ? storage_coords.z : storage_coords.y);
+		int o = scroll[axis];
+		int rel = ((s - o) % n + n) % n;
+		if (d > 0 && rel >= n - d) {
+			return true;
+		}
+		if (d < 0 && rel < -d) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Surface bias for sampling (avoids self-shadowing artifacts) */
 
 vec3 ddgi_surface_bias(vec3 surface_normal, vec3 camera_direction, DDGIVolumeData volume) {
@@ -260,7 +355,7 @@ vec3 ddgi_surface_bias(vec3 surface_normal, vec3 camera_direction, DDGIVolumeDat
 // DDGI_EDGE_FADE_SPACINGS probe spacings outside of it. Wider than the
 // original 1-spacing fade to soften the hard boundary sweep when the grid
 // scrolls. The outer probes have less-converged data, so the fade shouldn't
-// be too wide — 3 spacings is a good balance for single-grid volumes.
+// be too wide -- 3 spacings is a good balance for single-grid volumes.
 #define DDGI_EDGE_FADE_SPACINGS 3.0
 float ddgi_volume_blend_weight(vec3 world_position, DDGIVolumeData volume) {
 	vec3 origin = volume.origin + (vec3(volume.probe_scroll_offsets) * volume.probe_spacing);
@@ -349,7 +444,7 @@ vec4 ddgi_fetch_probe_data(ivec3 coords) {
 
 #if defined(DDGI_INC_SAMPLING) || defined(DDGI_INC_SAMPLING_IMAGE)
 
-vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 direction, DDGIVolumeData volume) {
+vec3 ddgi_sample_irradiance_single(vec3 world_position, vec3 surface_bias, vec3 direction, DDGIVolumeData volume) {
 	vec3 irradiance = vec3(0.0);
 	float accumulated_weights = 0.0;
 	// Fallback accumulator with the RTXGI 5% visibility floor; only used when
@@ -499,6 +594,52 @@ vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 directi
 	irradiance *= DDGI_2PI; // Complete the Monte Carlo estimator (hemisphere area).
 
 	return irradiance;
+}
+
+// Cascade selection by view distance (view_relative = sample_point - camera).
+float ddgi_select_cascade(vec3 view_relative, DDGIVolumeData volume) {
+	if (volume.cascade_count <= 1) {
+		return 0.0;
+	}
+	vec3 cascade0_range = volume.probe_spacing * vec3(volume.probe_counts / 2 - ivec3(2));
+	vec3 normalized_dist = abs(view_relative) / max(cascade0_range, vec3(0.001));
+	float dist = length(normalized_dist);
+	float cascade = log2(max(dist, 0.001)) + 1.0;
+	float blend_start = float(volume.cascade_count - 1) * 0.7;
+	return mix(cascade, float(volume.cascade_count - 1), smoothstep(blend_start, float(volume.cascade_count - 1), cascade));
+}
+
+// Cascade-aware wrapper: selects cascade by view distance, creates a
+// per-cascade volume copy with the correct spacing/scroll/layer-offset,
+// and blends between adjacent cascades in the overlap band.
+vec3 ddgi_sample_irradiance(vec3 world_position, vec3 surface_bias, vec3 direction, vec3 view_relative, DDGIVolumeData volume) {
+	if (volume.cascade_count <= 1) {
+		return ddgi_sample_irradiance_single(world_position, surface_bias, direction, volume);
+	}
+
+	float cascade_f = ddgi_select_cascade(view_relative, volume);
+	int lower = int(floor(cascade_f));
+	int upper = min(lower + 1, volume.cascade_count - 1);
+
+	DDGIVolumeData lower_vol = volume;
+	lower_vol.probe_spacing = ddgi_cascade_spacing(lower, volume);
+	lower_vol.probe_scroll_offsets = ddgi_cascade_scroll_offsets(lower, volume);
+	lower_vol.scroll_delta = ddgi_cascade_scroll_delta(lower, volume);
+	lower_vol.cascade_ubo_pad.x = lower * volume.probe_counts.y;
+	vec3 lower_irradiance = ddgi_sample_irradiance_single(world_position, surface_bias, direction, lower_vol);
+
+	if (lower >= upper) {
+		return lower_irradiance;
+	}
+
+	DDGIVolumeData upper_vol = volume;
+	upper_vol.probe_spacing = ddgi_cascade_spacing(upper, volume);
+	upper_vol.probe_scroll_offsets = ddgi_cascade_scroll_offsets(upper, volume);
+	upper_vol.scroll_delta = ddgi_cascade_scroll_delta(upper, volume);
+	upper_vol.cascade_ubo_pad.x = upper * volume.probe_counts.y;
+	vec3 upper_irradiance = ddgi_sample_irradiance_single(world_position, surface_bias, direction, upper_vol);
+
+	return mix(lower_irradiance, upper_irradiance, fract(cascade_f));
 }
 
 #endif // DDGI_INC_SAMPLING || DDGI_INC_SAMPLING_IMAGE

@@ -785,6 +785,10 @@ public:
 		};
 
 		enum {
+			MAX_CASCADES = 4,
+		};
+
+		enum {
 			SKY_MODE_COLOR = 0,
 			SKY_MODE_SKY_2D = 1,
 			SKY_MODE_SKY_ARRAY = 2,
@@ -834,9 +838,19 @@ public:
 			float motion_region_max[8][4];
 			int32_t motion_region_count;
 			// Roughness below which RT reflections fully replace probe glossy.
-			float rt_reflections_fade_start;
-			int32_t motion_pad[2];
-};
+		float rt_reflections_fade_start;
+		int32_t motion_pad[2];
+
+		// Cascade data: each cascade multiplies the probe spacing by
+		// cascade_spacing_ratio, giving exponential coverage growth.
+		// Cascade 0 uses the existing probe_scroll_offsets/scroll_delta above;
+		// cascades 1..N use these per-cascade arrays.
+		int32_t cascade_count;
+		float cascade_spacing_ratio;
+		int32_t cascade_ubo_pad[2];
+		int32_t cascade_scroll_offsets[MAX_CASCADES][4]; // [cascade] = {x, y, z, pad}
+		int32_t cascade_scroll_delta[MAX_CASCADES][4];
+	};
 
 		// Mirrors InstanceData in ddgi.glsl (std430).
 		struct InstanceDataSSBO {
@@ -896,6 +910,14 @@ public:
 		Vector3i scroll_delta;
 		bool needs_reset = true;
 		uint32_t frame = 0;
+
+		// Cascade configuration.
+		int cascade_count = 1; // 1 = single grid (no cascades).
+		float cascade_spacing_ratio = 2.0;
+
+		// Per-cascade scroll state (cascade 0 uses scroll_offsets/scroll_delta above).
+		Vector3i cascade_scroll_offsets[MAX_CASCADES];
+		Vector3i cascade_scroll_delta[MAX_CASCADES];
 
 		RID ray_data_tex;
 		RID irradiance_tex;

@@ -203,7 +203,11 @@ vec3 evaluate_direct_light(vec3 position, vec3 normal, uint shaded_instance) {
 void main() {
 	int ray_index = int(gl_LaunchIDEXT.x);
 	int probe_plane_index = int(gl_LaunchIDEXT.y);
-	int plane_index = int(gl_LaunchIDEXT.z);
+	int full_plane_index = int(gl_LaunchIDEXT.z);
+
+	// Extract cascade index and cascade-local plane index.
+	int cascade_index = full_plane_index / ddgi.data.probe_counts.y;
+	int plane_index = full_plane_index % ddgi.data.probe_counts.y;
 
 	int probes_per_plane = ddgi_probes_per_plane(ddgi.data);
 	int probe_index = (plane_index * probes_per_plane) + probe_plane_index;
@@ -211,9 +215,9 @@ void main() {
 	ivec3 probe_coords = ddgi_probe_coords(probe_index, ddgi.data);
 
 	// The storage (texture) index accounts for the scrolling offsets.
-	int storage_index = ddgi_scrolling_probe_index(probe_coords, ddgi.data);
+	int storage_index = ddgi_scrolling_probe_index_cascade(probe_coords, cascade_index, ddgi.data);
 
-	ivec3 probe_data_coords = ddgi_probe_texel_coords(storage_index, ddgi.data);
+	ivec3 probe_data_coords = ddgi_probe_texel_coords_cascade(storage_index, cascade_index, ddgi.data);
 	vec4 probe_data = ddgi_fetch_probe_data(probe_data_coords);
 
 	bool use_relocation = (ddgi.data.flags & DDGI_FLAG_PROBE_RELOCATION) != 0;
@@ -222,7 +226,7 @@ void main() {
 
 	// Scroll-cleared probes may inherit stale probe_data (INACTIVE state,
 	// relocation offset) from the previous occupant of their toroidal slot.
-	bool scroll_cleared = ddgi_probe_scroll_cleared(probe_data_coords, ddgi.data);
+	bool scroll_cleared = ddgi_probe_scroll_cleared_cascade(probe_data_coords, cascade_index, ddgi.data);
 
 	// Inactive probes only trace the fixed rays used by classification.
 	// Scroll-cleared probes force a full trace regardless of stale state.
@@ -230,14 +234,14 @@ void main() {
 		return;
 	}
 
-	vec3 probe_world_position = ddgi_probe_world_position_base(probe_coords, ddgi.data);
+	vec3 probe_world_position = ddgi_probe_world_position_base_cascade(probe_coords, cascade_index, ddgi.data);
 	if (use_relocation && !scroll_cleared) {
-		probe_world_position += probe_data.xyz * ddgi.data.probe_spacing;
+		probe_world_position += probe_data.xyz * ddgi_cascade_spacing(cascade_index, ddgi.data);
 	}
 
 	vec3 probe_ray_direction = ddgi_probe_ray_direction(ray_index, ddgi.data);
 
-	ivec3 output_coords = ddgi_ray_data_texel_coords(ray_index, storage_index, ddgi.data);
+	ivec3 output_coords = ddgi_ray_data_texel_coords_cascade(ray_index, storage_index, cascade_index, ddgi.data);
 
 	payload.hit_t = 1e27;
 	traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, probe_world_position, 0.0, probe_ray_direction, ddgi.data.probe_max_ray_distance, 0);
@@ -321,7 +325,7 @@ void main() {
 	float volume_weight = ddgi_volume_blend_weight(hit_position, ddgi.data);
 	if (volume_weight > 0.0) {
 		vec3 surface_bias = ddgi_surface_bias(normal, probe_ray_direction, ddgi.data);
-		irradiance = ddgi_sample_irradiance(hit_position, surface_bias, normal, ddgi.data);
+		irradiance = ddgi_sample_irradiance_single(hit_position, surface_bias, normal, ddgi.data);
 		irradiance *= volume_weight;
 	}
 

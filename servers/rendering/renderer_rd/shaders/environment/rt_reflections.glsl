@@ -417,7 +417,7 @@ void main() {
 		float volume_weight = ddgi_volume_blend_weight(hit_position, ddgi.data);
 		if (volume_weight > 0.0) {
 			vec3 surface_bias = ddgi_surface_bias(hit_normal, reflect_dir, ddgi.data);
-			irradiance = ddgi_sample_irradiance(hit_position, surface_bias, hit_normal, ddgi.data);
+			irradiance = ddgi_sample_irradiance_single(hit_position, surface_bias, hit_normal, ddgi.data);
 			irradiance *= volume_weight * ddgi.data.energy;
 		}
 
@@ -440,7 +440,7 @@ void main() {
 			float spec_volume_weight = ddgi_volume_blend_weight(hit_position, ddgi.data);
 			if (spec_volume_weight > 0.0) {
 				vec3 spec_bias = ddgi_surface_bias(hit_normal, reflect_dir, ddgi.data);
-				specular_env = ddgi_sample_irradiance(hit_position, spec_bias, hit_reflect, ddgi.data);
+				specular_env = ddgi_sample_irradiance_single(hit_position, spec_bias, hit_reflect, ddgi.data);
 				specular_env *= spec_volume_weight * ddgi.data.energy / DDGI_2PI;
 			}
 		}
