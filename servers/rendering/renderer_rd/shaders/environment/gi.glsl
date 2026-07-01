@@ -550,7 +550,7 @@ void ddgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, ou
 			vec3 sampled = ddgi_sample_irradiance(world_position, surface_bias, glossy_direction, vertex, ddgi.data);
 			glossy_irradiance = mix(sampled, irradiance, approx_weight);
 		}
-		vec3 glossy = glossy_irradiance * (ddgi.data.energy / DDGI_PI);
+		vec3 glossy = glossy_irradiance * (ddgi.data.energy / DDGI_2PI);
 		reflection_light = vec4(glossy, blend * glossy_blend);
 	}
 }
