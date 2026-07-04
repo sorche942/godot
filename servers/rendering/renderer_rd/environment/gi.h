@@ -852,25 +852,28 @@ public:
 		int32_t cascade_scroll_delta[MAX_CASCADES][4];
 	};
 
-		// Mirrors InstanceData in ddgi.glsl (std430).
+		// Mirrors InstanceData in ddgi.glsl and rt_reflections.glsl (std430).
 		struct InstanceDataSSBO {
 			float xform[12]; // 3 rows of vec4.
 			uint32_t vertex_buffer_address[2];
-			uint32_t albedo_tex_index; // Index into the albedo texture table, 0xFFFFFFFF if none.
-			uint32_t pad;
+			uint32_t albedo_tex_index; // Index into the material texture table, 0xFFFFFFFF if none.
+			uint32_t clearcoat_tex_index; // Index into the material texture table, 0xFFFFFFFF if none.
 			float albedo[4];
 			float emission[4];
 			float uv_scale_offset[4]; // Material uv1 scale.xy + offset.xy.
 			// x = metallic, y = roughness, z/w = packed texture slots for the
 			// metallic and roughness maps (index * 4 + channel, or -1).
 			float metallic_roughness[4];
+			// x = clearcoat, y = clearcoat roughness, z/w = unused.
+			float clearcoat[4];
 		};
+		static_assert(sizeof(InstanceDataSSBO) == 144);
 
 		enum {
 			MAX_ALBEDO_TEXTURES = 32,
 		};
 
-		// Albedo texture table for hit shading, rebuilt every update.
+		// Material texture table for hit shading, rebuilt every update.
 		LocalVector<RID> albedo_texture_table;
 
 		// Mirrors DDGILight in ddgi.glsl (std430).

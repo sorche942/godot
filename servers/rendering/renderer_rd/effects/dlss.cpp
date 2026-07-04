@@ -28,9 +28,13 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#ifdef DLSS_ENABLED
-
 #include "dlss.h"
+
+Vector2 RendererRD::dlss_get_motion_vector_scale(const Size2i &p_render_size) {
+	return Vector2(p_render_size.width, p_render_size.height);
+}
+
+#ifdef DLSS_ENABLED
 
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
@@ -291,9 +295,9 @@ void DLSSEffect::_eval_callback(RenderingDeviceDriver *p_driver, RDD::CommandBuf
 	eval_params.InJitterOffsetY = payload->jitter.y;
 	eval_params.InRenderSubrectDimensions.Width = payload->render_size.width;
 	eval_params.InRenderSubrectDimensions.Height = payload->render_size.height;
-	// Godot's velocity buffer is in UV space; DLSS wants pixels.
-	eval_params.InMVScaleX = float(payload->render_size.width);
-	eval_params.InMVScaleY = float(payload->render_size.height);
+	Vector2 motion_vector_scale = dlss_get_motion_vector_scale(payload->render_size);
+	eval_params.InMVScaleX = motion_vector_scale.x;
+	eval_params.InMVScaleY = motion_vector_scale.y;
 	eval_params.InReset = (payload->reset || just_created) ? 1 : 0;
 
 	NVSDK_NGX_Result result = NGX_VULKAN_EVALUATE_DLSS_EXT(vk_command_buffer, context->features[view], context->ngx_parameters, &eval_params);

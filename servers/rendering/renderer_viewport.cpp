@@ -198,6 +198,11 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				}
 			}
 
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS && msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
+				WARN_PRINT_ONCE("DLSS upscaling does not support 3D MSAA. Disabling 3D MSAA internally.");
+				msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
+			}
+
 			bool scaling_3d_is_not_bilinear = scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_OFF && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 			bool use_taa = p_viewport->use_taa;
 

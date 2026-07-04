@@ -48,6 +48,17 @@ MotionVectorsStore::~MotionVectorsStore() {
 	motion_shader.version_free(shader_version);
 }
 
+Projection MotionVectorsStore::get_reprojection(const Projection &p_current_view_projection, const Transform3D &p_current_transform,
+		const Projection &p_previous_view_projection, const Transform3D &p_previous_transform) {
+	Projection correction;
+	correction.set_depth_correction(true, true, false);
+
+	Projection current_view_projection = p_current_view_projection * Projection(p_current_transform.affine_inverse());
+	Projection previous_view_projection = p_previous_view_projection * Projection(p_previous_transform.affine_inverse());
+	return (correction * previous_view_projection) * (correction * current_view_projection).inverse();
+}
+
+
 void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 		const Projection *p_current_view_projection, const Transform3D &p_current_transform,
 		const Projection *p_previous_view_projection, const Transform3D &p_previous_transform) {
@@ -60,18 +71,9 @@ void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 	uint32_t view_count = p_render_buffers->get_view_count();
 	Size2i internal_size = p_render_buffers->get_internal_size();
 
-	Projection correction;
-	correction.set_depth_correction(true, true, false);
-
-	// Compose the per-eye projection with the shared camera transform to obtain
-	// a full world->clip matrix per view. In stereo the eye offset is already
-	// baked into view_projection[v]; in mono view_projection[0] is the bare
-	// projection, so this becomes P*T^-1 and the reprojection below reduces to
-	// (correction*prev_P)*prev_T^-1*T*(correction*P)^-1 -- identical to the
-	// previous single-matrix code path.
-	Projection current_view_inverse = Projection(p_current_transform.affine_inverse());
-	Projection previous_view_inverse = Projection(p_previous_transform.affine_inverse());
-
+	// Compose each per-view projection with the shared camera transform. In
+	// stereo, eye offsets live in view_projection[v]; in mono, view_projection[0]
+	// is the bare camera projection.
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
 	RD::get_singleton()->draw_command_begin_label("Motion Vector Store");
@@ -87,9 +89,8 @@ void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 	push_constant.resolution[1] = internal_size.height;
 
 	for (uint32_t v = 0; v < view_count; v++) {
-		Projection current_view_projection = p_current_view_projection[v] * current_view_inverse;
-		Projection previous_view_projection = p_previous_view_projection[v] * previous_view_inverse;
-		Projection reprojection = (correction * previous_view_projection) * (correction * current_view_projection).inverse();
+		Projection reprojection = get_reprojection(p_current_view_projection[v], p_current_transform,
+				p_previous_view_projection[v], p_previous_transform);
 		RendererRD::MaterialStorage::store_camera(reprojection, push_constant.reprojection_matrix);
 
 		RID velocity = p_render_buffers->get_velocity_buffer(false, v);

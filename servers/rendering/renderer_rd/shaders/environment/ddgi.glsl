@@ -57,14 +57,16 @@ ddgi;
 struct InstanceData {
 	vec4 xform[3]; // World transform rows.
 	uvec2 vertex_buffer_address;
-	uint albedo_tex_index; // Index into the albedo texture table, 0xFFFFFFFF if none.
-	uint pad1;
+	uint albedo_tex_index; // Index into the material texture table, 0xFFFFFFFF if none.
+	uint clearcoat_tex_index; // Index into the material texture table, 0xFFFFFFFF if none.
 	vec4 albedo;
 	vec4 emission;
 	vec4 uv_scale_offset; // Material uv1 scale.xy + offset.xy.
 	// x = metallic, y = roughness, z/w = packed texture slots for the metallic
 	// and roughness maps (index * 4 + channel, or -1).
 	vec4 metallic_roughness;
+	// x = clearcoat, y = clearcoat roughness, z/w = unused.
+	vec4 clearcoat;
 };
 
 layout(set = 0, binding = 2, std430) restrict readonly buffer Instances {
@@ -113,6 +115,12 @@ float get_omni_attenuation(float distance, float inv_range, float decay) {
 	nd = max(1.0 - nd, 0.0);
 	nd *= nd; // nd^2
 	return nd * pow(max(distance, 0.0001), -decay);
+}
+
+float schlick_fresnel(float u) {
+	float m = clamp(1.0 - u, 0.0, 1.0);
+	float m2 = m * m;
+	return m2 * m2 * m;
 }
 
 bool trace_shadow_ray(vec3 origin, vec3 direction, float max_distance) {
@@ -331,7 +339,7 @@ void main() {
 
 	vec2 uv = vec2(0.0);
 	bool has_uv = false;
-	if (instance.albedo_tex_index != 0xFFFFFFFF || instance.metallic_roughness.z >= 0.0 || instance.metallic_roughness.w >= 0.0) {
+	if (instance.albedo_tex_index != 0xFFFFFFFF || instance.clearcoat_tex_index != 0xFFFFFFFF || instance.metallic_roughness.z >= 0.0 || instance.metallic_roughness.w >= 0.0) {
 		vec2 uv0 = vec2(tri.data[base + 3], tri.data[base + 4]);
 		vec2 uv1 = vec2(tri.data[base + 11], tri.data[base + 12]);
 		vec2 uv2 = vec2(tri.data[base + 19], tri.data[base + 20]);
@@ -360,6 +368,11 @@ void main() {
 		surface_roughness *= textureLod(sampler2D(albedo_textures[nonuniformEXT(packed >> 2)], material_sampler), uv, tex_lod)[packed & 3];
 	}
 
+	float clearcoat_strength = clamp(instance.clearcoat.x, 0.0, 1.0);
+	if (has_uv && instance.clearcoat_tex_index != 0xFFFFFFFF) {
+		clearcoat_strength = clamp(clearcoat_strength * textureLod(sampler2D(albedo_textures[nonuniformEXT(instance.clearcoat_tex_index)], material_sampler), uv, tex_lod).r, 0.0, 1.0);
+	}
+
 	// For probe bounce purposes a metal behaves like a tinted diffuse
 	// reflector of equivalent energy: kd + f0 = albedo*(1-m) + mix(0.04,
 	// albedo, m) ~= albedo. Directional specular detail is invisible after the
@@ -367,6 +380,12 @@ void main() {
 	// noise; the directional metallic workflow lives in the reflections pass.
 	float dielectric_boost = 0.04 * (1.0 - metallic);
 	vec3 bounce_color = min(albedo + vec3(dielectric_boost), vec3(0.9));
+
+	if (clearcoat_strength > 0.0) {
+		float coat_n_dot_v = max(dot(normal, -probe_ray_direction), 0.0001);
+		float coat_fresnel = mix(0.04, 1.0, schlick_fresnel(coat_n_dot_v)) * clearcoat_strength;
+		bounce_color *= 1.0 - coat_fresnel;
+	}
 
 	// emission.a is zero for emitters handled by the virtual lights above.
 	vec3 radiance = instance.emission.rgb * instance.emission.a + (bounce_color / DDGI_PI) * (direct + irradiance);

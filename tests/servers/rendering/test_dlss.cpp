@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  motion_vectors_store.h                                                */
+/*  test_dlss.cpp                                                         */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,38 +28,25 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#pragma once
+#include "servers/rendering/renderer_rd/effects/dlss.h"
 
-#include "servers/rendering/renderer_rd/shaders/effects/motion_vectors_store.glsl.gen.h"
-#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
+#include "tests/test_macros.h"
 
-namespace RendererRD {
-class MotionVectorsStore {
-	struct PushConstant {
-		float reprojection_matrix[16];
-		float resolution[2];
-		uint32_t pad[2];
-	};
+TEST_FORCE_LINK(test_dlss)
 
-	MotionVectorsStoreShaderRD motion_shader;
-	RID shader_version;
-	RID pipeline;
+namespace TestDLSS {
 
-public:
-	MotionVectorsStore();
-	~MotionVectorsStore();
+TEST_CASE("[Rendering][DLSS] Motion vector scale converts Godot UVs to DLSS pixels") {
+	const Vector2 scale = RendererRD::dlss_get_motion_vector_scale(Size2i(1920, 1080));
 
-	// Derives per-view camera motion from depth. Each entry of the projection
-	// arrays is composed with the shared (head/camera) transform into a full
-	// world->clip matrix, so reprojection is correct per eye in stereo (where
-	// the per-eye offset lives inside view_projection[v]) while collapsing to
-	// the previous single-matrix formula for mono (where view_projection[0] is
-	// the bare projection).
-	static Projection get_reprojection(const Projection &p_current_view_projection, const Transform3D &p_current_transform,
-			const Projection &p_previous_view_projection, const Transform3D &p_previous_transform);
+	CHECK_MESSAGE(scale.x == doctest::Approx(1920.0), "DLSS X motion keeps Godot's UV direction and scales to render pixels.");
+	CHECK_MESSAGE(scale.y == doctest::Approx(1080.0), "DLSS Y motion keeps Godot's top-left screen-space direction and scales to render pixels.");
+}
 
-	void process(Ref<RenderSceneBuffersRD> p_render_buffers,
-			const Projection *p_current_view_projection, const Transform3D &p_current_transform,
-			const Projection *p_previous_view_projection, const Transform3D &p_previous_transform);
-};
-} //namespace RendererRD
+TEST_CASE("[Rendering][DLSS] Zero render size keeps zero motion scale") {
+	const Vector2 scale = RendererRD::dlss_get_motion_vector_scale(Size2i());
+
+	CHECK_MESSAGE(scale.is_zero_approx(), "Degenerate render sizes must not synthesize motion.");
+}
+
+} // namespace TestDLSS

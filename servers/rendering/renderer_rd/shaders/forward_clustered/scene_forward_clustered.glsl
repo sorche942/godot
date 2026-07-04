@@ -2022,6 +2022,9 @@ void fragment_shader(in SceneData scene_data) {
 
 		ambient_light = mix(ambient_light, buffer_ambient.rgb, buffer_ambient.a);
 		indirect_specular_light = mix(indirect_specular_light, buffer_reflection.rgb, buffer_reflection.a);
+#if defined(LIGHT_CLEARCOAT_USED) && !defined(AMBIENT_LIGHT_DISABLED)
+		cc_specular_light = mix(cc_specular_light, buffer_reflection.rgb, buffer_reflection.a);
+#endif
 	}
 #endif // !USE_LIGHTMAP
 

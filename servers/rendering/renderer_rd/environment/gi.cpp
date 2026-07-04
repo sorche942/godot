@@ -4409,6 +4409,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 	static const StringName metallic_texture_param_name = "texture_metallic";
 	static const StringName roughness_texture_param_name = "texture_roughness";
 	static const StringName metallic_channel_param_name = "metallic_texture_channel";
+	static const StringName clearcoat_param_name = "clearcoat";
+	static const StringName clearcoat_roughness_param_name = "clearcoat_roughness";
+	static const StringName clearcoat_texture_param_name = "texture_clearcoat";
 
 	HashMap<RID, uint32_t> albedo_texture_indices;
 
@@ -4539,6 +4542,9 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				float surface_roughness = 1.0f;
 				float metallic_tex_packed = -1.0f;
 				float roughness_tex_packed = -1.0f;
+				uint32_t clearcoat_tex_index = 0xFFFFFFFF;
+				float clearcoat = 0.0f;
+				float clearcoat_roughness = 0.0f;
 
 				RID material = inst->data->material_override;
 				if (material.is_null() && (int)s < inst->data->surface_materials.size()) {
@@ -4606,6 +4612,15 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 						surface_roughness = roughness_v;
 					}
 
+					Variant clearcoat_v = material_storage->material_get_param(material, clearcoat_param_name);
+					if (clearcoat_v.get_type() == Variant::FLOAT) {
+						clearcoat = clearcoat_v;
+					}
+					Variant clearcoat_roughness_v = material_storage->material_get_param(material, clearcoat_roughness_param_name);
+					if (clearcoat_roughness_v.get_type() == Variant::FLOAT) {
+						clearcoat_roughness = clearcoat_roughness_v;
+					}
+
 					int32_t metallic_idx = table_index_for(metallic_texture_param_name, false);
 					if (metallic_idx >= 0) {
 						// The sampled channel comes from the material's channel mask.
@@ -4628,6 +4643,11 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 						// The roughness channel is baked into the material shader and
 						// not queryable; the red channel is the default.
 						roughness_tex_packed = float(roughness_idx * 4 + 0);
+					}
+
+					int32_t clearcoat_idx = table_index_for(clearcoat_texture_param_name, false);
+					if (clearcoat_idx >= 0) {
+						clearcoat_tex_index = uint32_t(clearcoat_idx);
 					}
 				}
 
@@ -4662,6 +4682,7 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				data.vertex_buffer_address[0] = rt_data.vertex_buffer_address & 0xFFFFFFFF;
 				data.vertex_buffer_address[1] = rt_data.vertex_buffer_address >> 32;
 				data.albedo_tex_index = albedo_tex_index;
+				data.clearcoat_tex_index = clearcoat_tex_index;
 				data.albedo[0] = albedo.r;
 				data.albedo[1] = albedo.g;
 				data.albedo[2] = albedo.b;
@@ -4691,6 +4712,10 @@ void GI::DDGI::update(RenderDataRD *p_render_data, RendererRD::SkyRD::Sky *p_sky
 				data.metallic_roughness[1] = surface_roughness;
 				data.metallic_roughness[2] = metallic_tex_packed;
 				data.metallic_roughness[3] = roughness_tex_packed;
+				data.clearcoat[0] = clearcoat;
+				data.clearcoat[1] = clearcoat_roughness;
+				data.clearcoat[2] = 0.0f;
+				data.clearcoat[3] = 0.0f;
 				instance_data.push_back(data);
 				}
 			}

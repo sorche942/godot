@@ -30,17 +30,25 @@
 
 #pragma once
 
-#ifdef DLSS_ENABLED
-
 #include "core/math/vector2.h"
+#include "core/math/vector2i.h"
+
+#ifdef DLSS_ENABLED
 #include "core/templates/rid.h"
 #include "servers/rendering/rendering_device.h"
+#endif
 
 // NVIDIA NGX forward declarations (avoid pulling the SDK headers in here).
 struct NVSDK_NGX_Handle;
 struct NVSDK_NGX_Parameter;
 
 namespace RendererRD {
+
+// Godot stores motion vectors in normalized screen/UV space using a top-left
+// origin. DLSS expects the same current-to-previous direction in render pixels.
+Vector2 dlss_get_motion_vector_scale(const Size2i &p_render_size);
+
+#ifdef DLSS_ENABLED
 
 class DLSSEffect;
 
@@ -135,6 +143,6 @@ public:
 	~DLSSEffect();
 };
 
-} // namespace RendererRD
-
 #endif // DLSS_ENABLED
+
+} // namespace RendererRD
