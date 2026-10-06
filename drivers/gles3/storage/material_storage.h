@@ -335,6 +335,8 @@ struct SceneShaderData : public ShaderData {
 	bool uses_vertex_time;
 	bool uses_fragment_time;
 	bool writes_modelview_or_projection;
+	bool writes_depth;
+	bool uses_z_clip_scale;
 	bool uses_world_coordinates;
 	bool uses_tangent;
 	bool writes_tangent;

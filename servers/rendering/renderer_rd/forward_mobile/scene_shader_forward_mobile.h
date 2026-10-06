@@ -48,11 +48,13 @@ public:
 		SHADER_VERSION_LIGHTMAP_COLOR_PASS,
 		SHADER_VERSION_SHADOW_PASS,
 		SHADER_VERSION_SHADOW_PASS_DP,
+		SHADER_VERSION_DEPTH_PASS,
 		SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL,
 
 		SHADER_VERSION_COLOR_PASS_MULTIVIEW,
 		SHADER_VERSION_LIGHTMAP_COLOR_PASS_MULTIVIEW,
 		SHADER_VERSION_SHADOW_PASS_MULTIVIEW,
+		SHADER_VERSION_DEPTH_PASS_MULTIVIEW,
 		SHADER_VERSION_MOTION_VECTORS_MULTIVIEW,
 
 		SHADER_VERSION_MAX
@@ -277,6 +279,9 @@ public:
 		bool uses_vertex_time = false;
 		bool uses_fragment_time = false;
 		bool writes_modelview_or_projection = false;
+		bool uses_position = false;
+		bool writes_depth = false;
+		bool uses_z_clip_scale = false;
 		bool uses_world_coordinates = false;
 
 		bool stencil_enabled = false;

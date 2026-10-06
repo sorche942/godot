@@ -37,6 +37,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/renderer_sdsm.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_default.h"
 #include "servers/rendering/storage/ltc_lut.gen.h"
@@ -868,6 +869,7 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 	bool is_multiview = rb->get_view_count() > 1;
+	bool using_sdsm = _sdsm_needed(p_render_data);
 
 	RENDER_TIMESTAMP("Prepare 3D Scene");
 
@@ -1183,7 +1185,37 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	// We don't have access to any rendered buffers but we may be able to effect mesh data...
 	_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_OPAQUE, p_render_data);
 
+	if (using_sdsm) {
+		// A separate camera-depth pass leaves the tile renderer's color subpasses intact.
+		RD::TextureSamples samples = is_reflection_probe ? RD::TEXTURE_SAMPLES_1 : rb->get_texture_samples();
+		RID sdsm_fb = _sdsm_depth_framebuffer(rb, screen_size, samples);
+		RID depth_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers);
+		RenderListParameters depth_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_DEPTH, depth_uniform_set, scene_shader.default_specialization, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count);
+		_render_list_with_draw_list(&depth_params, sdsm_fb, RD::DRAW_CLEAR_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+		sdsm_depth_views.resize(rb->get_view_count());
+		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+			sdsm_depth_views.write[v] = rb->get_texture_slice(SNAME("sdsm"), samples == RD::TEXTURE_SAMPLES_1 ? SNAME("depth") : SNAME("depth_msaa"), v, 0);
+		}
+		sdsm_extra_receivers.resize(p_render_data->instances->size());
+		uint32_t extra_receiver_count = 0;
+		for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
+			const GeometryInstanceForwardMobile *instance = static_cast<const GeometryInstanceForwardMobile *>((*p_render_data->instances)[i]);
+			for (const GeometryInstanceSurfaceDataCache *surface = instance->surface_caches; surface; surface = surface->next) {
+				if ((surface->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA | GeometryInstanceSurfaceDataCache::FLAG_USES_STENCIL)) || !(surface->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH) || surface->shader->writes_modelview_or_projection || surface->shader->uses_position || surface->shader->writes_depth || surface->shader->uses_z_clip_scale) {
+					sdsm_extra_receivers.write[extra_receiver_count++] = instance->transformed_aabb;
+					break;
+				}
+			}
+		}
+		sdsm_extra_receivers.resize(extra_receiver_count);
+		_process_sdsm(p_render_data, sdsm_depth_views, screen_size, sdsm_extra_receivers);
+	}
+
 	_pre_opaque_render(p_render_data);
+	if (using_sdsm) {
+		// Mobile pairs lights before constructing its render lists; publish the fitted matrices again.
+		light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
+	}
 
 	SceneShaderForwardMobile::ShaderSpecialization base_specialization = scene_shader.default_specialization;
 
@@ -2437,6 +2469,9 @@ void RenderForwardMobile::_render_list(RenderingDevice::DrawListID p_draw_list, 
 		case PASS_MODE_SHADOW: {
 			_render_list_template<PASS_MODE_SHADOW>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
 		} break;
+		case PASS_MODE_DEPTH: {
+			_render_list_template<PASS_MODE_DEPTH>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+		} break;
 		case PASS_MODE_SHADOW_DP: {
 			_render_list_template<PASS_MODE_SHADOW_DP>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
 		} break;
@@ -2492,6 +2527,11 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		const GeometryInstanceSurfaceDataCache *surf = p_params->elements[i];
 		const RenderElementInfo &element_info = p_params->element_info[i];
 		const GeometryInstanceForwardMobile *inst = surf->owner;
+		if constexpr (p_pass_mode == PASS_MODE_DEPTH) {
+			if (!(surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH)) {
+				continue;
+			}
+		}
 
 		if (inst->instance_count == 0) {
 			continue;
@@ -2519,6 +2559,11 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 			shader = surf->shader_shadow;
 			mesh_surface = surf->surface_shadow;
 
+		} else if constexpr (p_pass_mode == PASS_MODE_DEPTH) {
+			// Camera receivers use their original vertex/material and camera culling rules.
+			material_uniform_set = surf->material_uniform_set;
+			shader = surf->shader;
+			mesh_surface = surf->surface;
 		} else {
 			pipeline_specialization.use_light_projector = inst->use_projector;
 			pipeline_specialization.use_light_soft_shadows = inst->use_soft_shadow;
@@ -2583,6 +2628,9 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 				} else {
 					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS_MULTIVIEW : SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
 				}
+			} break;
+			case PASS_MODE_DEPTH: {
+				pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardMobile::SHADER_VERSION_DEPTH_PASS_MULTIVIEW : SceneShaderForwardMobile::SHADER_VERSION_DEPTH_PASS;
 			} break;
 			case PASS_MODE_SHADOW: {
 				pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardMobile::SHADER_VERSION_SHADOW_PASS_MULTIVIEW : SceneShaderForwardMobile::SHADER_VERSION_SHADOW_PASS;
@@ -3618,6 +3666,9 @@ RenderForwardMobile::RenderForwardMobile() {
 	}
 	// defines += "\n#define SDFGI_OCT_SIZE " + itos(gi.sdfgi_get_lightprobe_octahedron_size()) + "\n";
 	defines += "\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "\n";
+	if (RendererSDSM::is_enabled()) {
+		defines += "\n#define USE_SDSM_SHADOWS\n";
+	}
 
 	bool force_vertex_shading = GLOBAL_GET("rendering/shading/overrides/force_vertex_shading");
 	if (force_vertex_shading) {

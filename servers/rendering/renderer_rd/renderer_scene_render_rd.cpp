@@ -1361,7 +1361,77 @@ void RendererSceneRenderRD::_post_prepass_render(RenderDataRD *p_render_data, bo
 	}
 }
 
-void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
+bool RendererSceneRenderRD::_sdsm_needed(const RenderDataRD *p_render_data) const {
+	if (!RendererSDSM::is_enabled()) {
+		return false;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		RID base = light_storage->light_instance_get_base_light(p_render_data->render_shadows[i].light);
+		if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
+			return true;
+		}
+	}
+	return false;
+}
+
+RID RendererSceneRenderRD::_sdsm_depth_framebuffer(const Ref<RenderSceneBuffersRD> &p_buffers, const Size2i &p_size, RD::TextureSamples p_samples) {
+	const StringName context = SNAME("sdsm");
+	const StringName name = p_samples == RD::TEXTURE_SAMPLES_1 ? SNAME("depth") : SNAME("depth_msaa");
+	if (p_buffers->has_texture(context, name)) {
+		RD::TextureFormat format = p_buffers->get_texture_format(context, name);
+		if (format.width != uint32_t(p_size.x) || format.height != uint32_t(p_size.y) || format.samples != p_samples || format.array_layers != p_buffers->get_view_count()) {
+			p_buffers->clear_context(context);
+		}
+	}
+	if (!p_buffers->has_texture(context, name)) {
+		uint32_t usage = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+		RD::DataFormat format = RenderSceneBuffersRD::get_depth_format(false, p_samples != RD::TEXTURE_SAMPLES_1, p_buffers->get_can_be_storage());
+		p_buffers->create_texture(context, name, format, usage, p_samples, p_size, p_buffers->get_view_count());
+	}
+	return FramebufferCacheRD::get_singleton()->get_cache_multiview(p_buffers->get_view_count(), p_buffers->get_texture(context, name));
+}
+
+void RendererSceneRenderRD::_process_sdsm(RenderDataRD *p_render_data, const Vector<RID> &p_depth, const Size2i &p_size, const Vector<AABB> &p_extra_receivers) {
+	if (sdsm == nullptr) {
+		sdsm = memnew(RendererRD::SDSM);
+	}
+	sdsm_inverse_projection.resize(p_render_data->scene_data->view_count);
+	sdsm_view_to_camera.resize(p_render_data->scene_data->view_count);
+	for (uint32_t v = 0; v < p_render_data->scene_data->view_count; v++) {
+		sdsm_inverse_projection.write[v] = p_render_data->scene_data->get_view_projection(v).inverse();
+		// CameraData already bakes each eye's inverse pose into view_projection.
+		// Inverse projection therefore reconstructs main-camera coordinates.
+		sdsm_view_to_camera.write[v] = Transform3D();
+	}
+	Vector2 depth_range = sdsm->reduce_depth(p_depth, sdsm_inverse_projection, sdsm_view_to_camera, p_size, p_render_data->render_region);
+	// Froxels receive shadows throughout the camera volume, including empty
+	// space and global fog density, not only at opaque depth samples.
+	const real_t fog_length = p_render_data->reflection_probe.is_null() && is_environment(p_render_data->environment) && environment_get_volumetric_fog_enabled(p_render_data->environment) ? environment_get_volumetric_fog_length(p_render_data->environment) : 0;
+	if (fog_length > 0) {
+		depth_range.x = MIN(depth_range.x, p_render_data->scene_data->cam_projection.get_z_near());
+		depth_range.y = MAX(depth_range.y, fog_length);
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		RID instance = p_render_data->render_shadows[i].light;
+		RID base = light_storage->light_instance_get_base_light(instance);
+		if (p_render_data->render_shadows[i].pass != 0 || light_storage->light_get_type(base) != RSE::LIGHT_DIRECTIONAL) {
+			continue;
+		}
+		RendererSDSM::Light light;
+		if (!RendererSDSM::initialize_light(light, instance, base, light_storage->light_instance_get_base_transform(instance), p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_orthogonal, depth_range, p_extra_receivers, p_render_data->render_shadows, p_render_data->render_shadow_count)) {
+			continue;
+		}
+		RendererSDSM::Bounds bounds[4];
+		sdsm->reduce_bounds(p_depth, sdsm_inverse_projection, sdsm_view_to_camera, p_size, p_render_data->render_region, light, bounds);
+		RendererSDSM::include_extra_receivers(light, p_extra_receivers, bounds);
+		RendererSDSM::include_camera_volume(light, fog_length, bounds);
+		sdsm_fitter.apply_light(light, bounds, p_render_data->render_shadows);
+	}
+}
+
+void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
@@ -1908,6 +1978,9 @@ RendererSceneRenderRD::~RendererSceneRenderRD() {
 #endif
 
 	memdelete(resolve_effects);
+	if (sdsm != nullptr) {
+		memdelete(sdsm);
+	}
 
 	if (sky.sky_scene_state.uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sky.sky_scene_state.uniform_set)) {
 		RD::get_singleton()->free_rid(sky.sky_scene_state.uniform_set);

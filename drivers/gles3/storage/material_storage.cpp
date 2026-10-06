@@ -2994,6 +2994,8 @@ void SceneShaderData::set_code(const String &p_code) {
 	uses_vertex_time = false;
 	uses_fragment_time = false;
 	writes_modelview_or_projection = false;
+	writes_depth = false;
+	uses_z_clip_scale = false;
 	uses_world_coordinates = false;
 	uses_tangent = false;
 	writes_tangent = false;
@@ -3081,6 +3083,8 @@ void SceneShaderData::set_code(const String &p_code) {
 	actions.write_flag_pointers["PROJECTION_MATRIX"] = &writes_modelview_or_projection;
 	actions.write_flag_pointers["VERTEX"] = &uses_vertex;
 	actions.write_flag_pointers["POSITION"] = &uses_position;
+	actions.write_flag_pointers["DEPTH"] = &writes_depth;
+	actions.write_flag_pointers["Z_CLIP_SCALE"] = &uses_z_clip_scale;
 	actions.write_flag_pointers["TANGENT"] = &writes_tangent;
 	actions.write_flag_pointers["BINORMAL"] = &writes_tangent;
 

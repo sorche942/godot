@@ -7,6 +7,11 @@ previous feature release. It is equivalent to the listings on our
 Changelogs for earlier feature releases are available in their respective Git
 branches, and linked at the [end of this file](#Past-releases).
 
+## 4.8 - Unreleased
+
+- Rendering: Add Intel-style Sample Distribution Shadow Maps for directional lights, selectable alongside regular cascaded shadows in Project Settings.
+- Rendering: Fix directional shadow blur, PCF kernel scaling, and PCSS penumbra normalization in SDSM mode.
+
 ## 4.7 - 2026-06-18
 
 - [Release announcement](https://godotengine.org/releases/4.7/)

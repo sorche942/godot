@@ -200,6 +200,9 @@ void ShaderGLES3::_build_variant_code(StringBuilder &builder, uint32_t p_variant
 	// Insert multiview extension loading, because it needs to appear before
 	// any non-preprocessor code (like the "precision highp..." lines below).
 	builder.append("#ifdef USE_MULTIVIEW\n");
+	builder.append("#ifdef FORCE_EMULATE_MULTIVIEW\n");
+	builder.append("#define EMULATE_MULTIVIEW\n");
+	builder.append("#else\n");
 	if (GLES3::Config::get_singleton()->multiview_supported) {
 		builder.append("#if defined(GL_OVR_multiview2)\n");
 		builder.append("#extension GL_OVR_multiview2 : require\n");
@@ -213,6 +216,7 @@ void ShaderGLES3::_build_variant_code(StringBuilder &builder, uint32_t p_variant
 	} else {
 		builder.append("#define EMULATE_MULTIVIEW\n");
 	}
+	builder.append("#endif\n");
 	builder.append("#define MAX_VIEWS 2\n");
 	builder.append("#else\n");
 	builder.append("#define ViewIndex uint(0)\n");

@@ -84,7 +84,7 @@ public:
 	Rect2i render_region;
 
 	/* Shadow data */
-	const RendererSceneRender::RenderShadowData *render_shadows = nullptr;
+	RendererSceneRender::RenderShadowData *render_shadows = nullptr;
 	int render_shadow_count = 0;
 
 	LocalVector<int> cube_shadows;

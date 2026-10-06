@@ -1823,6 +1823,9 @@ void RasterizerSceneGLES3::_setup_lights(const RenderDataGLES3 *p_render_data, b
 					int limit = shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL ? 0 : (shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 1 : 3);
 
 					shadow_data.shadow_atlas_pixel_size = 1.0 / light_storage->directional_shadow_get_size();
+					if (RendererSDSM::is_enabled()) {
+						shadow_data.shadow_atlas_pixel_size *= MAX(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BLUR), 0.0f);
+					}
 
 					shadow_data.blend_splits = uint32_t((shadow_mode != RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL) && light_storage->light_directional_get_blend_splits(base));
 					for (int j = 0; j < 4; j++) {
@@ -2424,7 +2427,119 @@ void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, 
 	glBindFramebuffer(GL_FRAMEBUFFER, GLES3::TextureStorage::system_fbo);
 }
 
-void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
+void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const CameraData *p_camera_data, const Size2i &p_size, bool p_flip_y) {
+	GLES3::LightStorage *light_storage = GLES3::LightStorage::get_singleton();
+	bool has_directional = false;
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		if (light_storage->light_instance_get_type(p_render_data->render_shadows[i].light) == RSE::LIGHT_DIRECTIONAL) {
+			has_directional = true;
+			break;
+		}
+	}
+	if (!has_directional) {
+		return;
+	}
+	if (!sdsm) {
+		sdsm = memnew(GLES3::SDSM);
+	}
+	if (!sdsm->prepare(p_size, p_camera_data->view_count)) {
+		return;
+	}
+
+	RENDER_TIMESTAMP("SDSM Camera Depth");
+	RenderDataGLES3 depth_data = *p_render_data;
+	depth_data.render_info = nullptr;
+	depth_data.render_region = Rect2i();
+	_fill_render_list(RENDER_LIST_SECONDARY, &depth_data, PASS_MODE_DEPTH);
+	render_list[RENDER_LIST_SECONDARY].sort_by_key();
+	Vector<AABB> &extra_receivers = sdsm_extra_receivers;
+	int extra_receiver_count = 0;
+	// GLES 3 cannot sample the renderbuffer's individual MSAA depth samples.
+	// Pixel-center depth can miss entire receivers through subpixel gaps, so
+	// retain their visible-instance bounds when MSAA is active.
+	const bool conservative_msaa = p_render_data->render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+	for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
+		GeometryInstanceGLES3 *instance = static_cast<GeometryInstanceGLES3 *>((*p_render_data->instances)[i]);
+		for (GeometryInstanceSurface *surface = instance->surface_caches; surface; surface = surface->next) {
+			if (conservative_msaa || (surface->flags & GeometryInstanceSurface::FLAG_PASS_ALPHA) ||
+					!(surface->flags & GeometryInstanceSurface::FLAG_PASS_DEPTH) ||
+					surface->shader->depth_draw == GLES3::SceneShaderData::DEPTH_DRAW_DISABLED ||
+					surface->shader->depth_test != GLES3::SceneShaderData::DEPTH_TEST_ENABLED ||
+					surface->shader->writes_modelview_or_projection || surface->shader->uses_position ||
+					surface->shader->writes_depth || surface->shader->uses_z_clip_scale) {
+				if (extra_receiver_count == extra_receivers.size()) {
+					extra_receivers.push_back(instance->transformed_aabb);
+				} else {
+					extra_receivers.write[extra_receiver_count] = instance->transformed_aabb;
+				}
+				extra_receiver_count++;
+				break;
+			}
+		}
+	}
+	extra_receivers.resize(extra_receiver_count);
+	Vector<Projection> &inverse_projection = sdsm_inverse_projection;
+	Vector<Transform3D> &view_to_camera = sdsm_view_to_camera;
+	inverse_projection.resize(p_camera_data->view_count);
+	view_to_camera.resize(p_camera_data->view_count);
+	Projection correction;
+	correction.set_depth_correction(p_flip_y, true, false);
+	for (uint32_t view = 0; view < p_camera_data->view_count; view++) {
+		// Per-eye view_projection already includes the inverse eye pose. Render
+		// from the main camera so the pose is not applied a second time.
+		view_to_camera.write[view] = Transform3D();
+		depth_data.cam_transform = p_render_data->cam_transform;
+		depth_data.inv_cam_transform = p_render_data->inv_cam_transform;
+		depth_data.cam_projection = p_render_data->cam_projection;
+		inverse_projection.write[view] = (correction * (depth_data.view_count > 1 ? depth_data.view_projection[view] : depth_data.cam_projection)).inverse();
+		_setup_environment(&depth_data, true, p_size, p_flip_y, Color(), false);
+		if (depth_data.view_count > 1) {
+			scene_state.multiview_data.view_index = view;
+			_update_scene_ubo(scene_state.multiview_buffer, SCENE_MULTIVIEW_UNIFORM_LOCATION, sizeof(SceneState::MultiviewUBO), &scene_state.multiview_data, "Multiview UBO");
+		}
+		sdsm->bind_depth(view);
+		scene_state.reset_gl_state();
+		scene_state.enable_gl_depth_test(true);
+		scene_state.enable_gl_depth_draw(true);
+		scene_state.enable_gl_blend(false);
+		scene_state.set_gl_depth_func(GL_GEQUAL);
+		scene_state.enable_gl_scissor_test(false);
+		scene_state.enable_gl_stencil_test(false);
+		glColorMask(0, 0, 0, 0);
+		RasterizerUtilGLES3::clear_depth(0.0);
+		glClear(GL_DEPTH_BUFFER_BIT);
+		uint64_t flags = SceneShaderGLES3::DISABLE_FOG | SceneShaderGLES3::DISABLE_LIGHT_DIRECTIONAL |
+				SceneShaderGLES3::DISABLE_LIGHTMAP | SceneShaderGLES3::DISABLE_LIGHT_OMNI |
+				SceneShaderGLES3::DISABLE_LIGHT_SPOT | SceneShaderGLES3::DISABLE_LIGHT_AREA;
+		if (depth_data.view_count > 1) {
+			flags |= SceneShaderGLES3::FORCE_EMULATE_MULTIVIEW;
+		}
+		RenderListParameters parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr(), render_list[RENDER_LIST_SECONDARY].elements.size(), depth_data.cam_transform.basis.determinant() < 0, flags);
+		_render_list_template<PASS_MODE_DEPTH>(&parameters, &depth_data, 0, render_list[RENDER_LIST_SECONDARY].elements.size());
+	}
+	glColorMask(1, 1, 1, 1);
+	Vector2 depth_range = sdsm->reduce_depth(inverse_projection, view_to_camera);
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		const RenderShadowData &shadow = p_render_data->render_shadows[i];
+		if (shadow.pass != 0 || light_storage->light_instance_get_type(shadow.light) != RSE::LIGHT_DIRECTIONAL) {
+			continue;
+		}
+		RendererSDSM::Light light;
+		if (!RendererSDSM::initialize_light(light, shadow.light, light_storage->light_instance_get_base_light(shadow.light),
+					light_storage->light_instance_get_base_transform(shadow.light), p_render_data->cam_projection,
+					p_render_data->cam_transform, p_render_data->cam_orthogonal, depth_range, extra_receivers,
+					p_render_data->render_shadows, p_render_data->render_shadow_count)) {
+			continue;
+		}
+		RendererSDSM::Bounds bounds[4];
+		sdsm->reduce_bounds(inverse_projection, view_to_camera, light, bounds);
+		RendererSDSM::include_extra_receivers(light, extra_receivers, bounds);
+		sdsm_fitter.apply_light(light, bounds, p_render_data->render_shadows);
+	}
+	scene_state.reset_gl_state();
+}
+
+void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	GLES3::Config *config = GLES3::Config::get_singleton();
 	RENDER_TIMESTAMP("Setup 3D Scene");
@@ -2599,6 +2714,9 @@ void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_
 	if (!flip_y) {
 		// If we're rendering right-side up, then we need to change the winding order.
 		glFrontFace(GL_CW);
+	}
+	if (RendererSDSM::is_enabled()) {
+		_update_sdsm(&render_data, p_camera_data, screen_size, flip_y);
 	}
 	_render_shadows(&render_data, screen_size);
 
@@ -4887,6 +5005,9 @@ void sky() {
 }
 
 RasterizerSceneGLES3::~RasterizerSceneGLES3() {
+	if (sdsm) {
+		memdelete(sdsm);
+	}
 	if (ltc.lut1_texture.is_valid()) {
 		RS::get_singleton()->free_rid(ltc.lut1_texture);
 	}
