@@ -44,6 +44,8 @@ class RenderDataRD;
 
 namespace RendererRD {
 
+class SDSM;
+
 class LightStorage : public RendererLightStorage {
 public:
 	enum ShadowAtlastQuadrant : uint32_t {
@@ -858,6 +860,7 @@ public:
 		return false;
 	}
 	void update_light_buffers(RenderDataRD *p_render_data, const PagedArray<RID> &p_lights, const Transform3D &p_camera_transform, RID p_shadow_atlas, bool p_using_shadows, uint32_t &r_directional_light_count, uint32_t &r_positional_light_count, bool &r_directional_light_soft_shadows);
+	void patch_sdsm_directional_lights(SDSM *p_sdsm, const PagedArray<RID> &p_lights);
 
 	/* REFLECTION PROBE */
 

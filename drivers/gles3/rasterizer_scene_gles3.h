@@ -761,6 +761,10 @@ private:
 	void _fill_render_list(RenderListType p_render_list, const RenderDataGLES3 *p_render_data, PassMode p_pass_mode, bool p_append = false);
 	GLES3::SDSM *sdsm = nullptr;
 	RendererSDSM sdsm_fitter;
+	bool sdsm_active = false;
+	int sdsm_shadow_row = -1;
+	int sdsm_light_rows[MAX_DIRECTIONAL_LIGHTS] = {};
+	RID sdsm_directional_lights[MAX_DIRECTIONAL_LIGHTS];
 	Vector<AABB> sdsm_extra_receivers;
 	Vector<Projection> sdsm_inverse_projection;
 	Vector<Transform3D> sdsm_view_to_camera;

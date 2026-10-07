@@ -26,6 +26,7 @@ USE_DECALS = false
 USE_DECAL_MIPMAPS = false
 RENDER_SHADOWS = false
 RENDER_SHADOWS_LINEAR = false
+USE_SDSM = false
 SHADOW_MODE_PCF_5 = false
 SHADOW_MODE_PCF_13 = false
 LIGHT_USE_PSSM2 = false
@@ -237,6 +238,8 @@ struct SceneData {
 	uint camera_visible_layers;
 	bool pancake_shadows;
 };
+
+#include "sdsm_scene_inc.glsl"
 
 // The containing data block is for historic reasons.
 layout(std140) uniform SceneDataBlock { // ubo:2
@@ -620,6 +623,10 @@ void vertex_shader(vec4 vertex_angle_attrib_input,
 #endif
 		vec4 uv_scale_input,
 		out vec4 clip_position_output) {
+#if defined(USE_SDSM) && defined(RENDER_SHADOWS)
+	sdsm_set_camera(scene_data_input);
+#endif
+	sdsm_scene_data = scene_data_input;
 	highp vec3 vertex = vertex_angle_attrib_input.xyz * compressed_aabb_size_input + compressed_aabb_position_input;
 
 	highp mat4 model_matrix = world_transform_input;
@@ -698,6 +705,10 @@ void vertex_shader(vec4 vertex_angle_attrib_input,
 	mat4 inv_projection_matrix = scene_data_input.inv_projection_matrix;
 	vec3 eye_offset = vec3(0.0, 0.0, 0.0);
 #endif //!USE_MULTIVIEW
+#if defined(USE_SDSM) && defined(RENDER_SHADOWS)
+	projection_matrix = scene_data_input.projection_matrix;
+	inv_projection_matrix = scene_data_input.inv_projection_matrix;
+#endif
 
 #ifdef USE_INSTANCING
 	vec4 instance_custom;
@@ -732,6 +743,17 @@ void vertex_shader(vec4 vertex_angle_attrib_input,
 
 	highp mat4 modelview = scene_data_input.view_matrix * model_matrix;
 	highp mat3 modelview_normal = mat3(scene_data_input.view_matrix) * model_normal_matrix;
+#if defined(USE_SDSM) && defined(RENDER_SHADOWS)
+	if (sdsm_shadow_row >= 0 && texelFetch(sdsm_camera_texture, ivec2(0, sdsm_shadow_row), 0).w > 0.0) {
+		// Subtract the camera origin on the CPU, before converting doubles to floats.
+		mat4 relative_model = world_transform_input;
+		relative_model[3].xyz = sdsm_model_origin;
+#ifdef USE_INSTANCING
+		relative_model *= transpose(m);
+#endif
+		modelview = sdsm_camera_matrix(8, sdsm_shadow_row) * relative_model;
+	}
+#endif
 
 	float point_size = 1.0;
 
@@ -804,20 +826,54 @@ void vertex_shader(vec4 vertex_angle_attrib_input,
 	shadow_coord = vec4(vertex_interp + normal_offset, 1.0);
 #endif
 #else // ADDITIVE_DIRECTIONAL
-	vec3 base_normal_bias = normalize(normal_interp) * (1.0 - max(0.0, dot(directional_shadows[directional_shadow_index].direction, -normalize(normal_interp))));
-	vec3 normal_offset = base_normal_bias * directional_shadows[directional_shadow_index].shadow_normal_bias.x;
-	shadow_coord = directional_shadows[directional_shadow_index].shadow_matrix1 * vec4(vertex_interp + normal_offset, 1.0);
+	DirectionalShadowData shadow_data = directional_shadows[directional_shadow_index];
+#ifdef USE_SDSM
+	if (sdsm_light_row >= 0 && texelFetch(sdsm_camera_texture, ivec2(0, sdsm_light_row), 0).w > 0.0) {
+		shadow_data.shadow_split_offsets = texelFetch(sdsm_camera_texture, ivec2(2, sdsm_light_row), 0);
+		mat4 matrices[4];
+		mat4 camera_to_relative_world = scene_data_input.inv_view_matrix;
+		camera_to_relative_world[3].xyz = vec3(0.0);
+		for (int cascade = 0; cascade < 4; cascade++) {
+			int row = sdsm_light_row + cascade;
+			int active_cascade = cascade;
+#ifndef LIGHT_USE_PSSM4
+#ifdef LIGHT_USE_PSSM2
+			active_cascade = min(cascade, 1);
+#else
+			active_cascade = 0;
+#endif
+#endif
+			row = sdsm_light_row + active_cascade;
+			shadow_data.shadow_normal_bias[cascade] = texelFetch(sdsm_camera_texture, ivec2(3, row), 0).x;
+			vec4 rect = sdsm_atlas_rects[active_cascade];
+			mat4 atlas_bias = mat4(vec4(rect.z * 0.5, 0.0, 0.0, 0.0), vec4(0.0, rect.w * 0.5, 0.0, 0.0), vec4(0.0, 0.0, 0.5, 0.0), vec4(rect.xy + rect.zw * 0.5, 0.5, 1.0));
+			matrices[cascade] = atlas_bias * sdsm_camera_matrix(4, row) * sdsm_camera_matrix(8, row) * camera_to_relative_world;
+		}
+		shadow_data.shadow_matrix1 = matrices[0];
+		shadow_data.shadow_matrix2 = matrices[1];
+		shadow_data.shadow_matrix3 = matrices[2];
+		shadow_data.shadow_matrix4 = matrices[3];
+	}
+#endif
+	vec3 base_normal_bias = normalize(normal_interp) * (1.0 - max(0.0, dot(shadow_data.direction, -normalize(normal_interp))));
+	vec3 normal_offset = base_normal_bias * shadow_data.shadow_normal_bias.x;
+	shadow_coord = shadow_data.shadow_matrix1 * vec4(vertex_interp + normal_offset, 1.0);
+	// Orthographic coordinates have w=1; reuse that lane for cascade ends.
+	shadow_coord.w = shadow_data.shadow_split_offsets.x;
 
 #if defined(LIGHT_USE_PSSM2) || defined(LIGHT_USE_PSSM4)
-	normal_offset = base_normal_bias * directional_shadows[directional_shadow_index].shadow_normal_bias.y;
-	shadow_coord2 = directional_shadows[directional_shadow_index].shadow_matrix2 * vec4(vertex_interp + normal_offset, 1.0);
+	normal_offset = base_normal_bias * shadow_data.shadow_normal_bias.y;
+	shadow_coord2 = shadow_data.shadow_matrix2 * vec4(vertex_interp + normal_offset, 1.0);
+	shadow_coord2.w = shadow_data.shadow_split_offsets.y;
 #endif
 
 #ifdef LIGHT_USE_PSSM4
-	normal_offset = base_normal_bias * directional_shadows[directional_shadow_index].shadow_normal_bias.z;
-	shadow_coord3 = directional_shadows[directional_shadow_index].shadow_matrix3 * vec4(vertex_interp + normal_offset, 1.0);
-	normal_offset = base_normal_bias * directional_shadows[directional_shadow_index].shadow_normal_bias.w;
-	shadow_coord4 = directional_shadows[directional_shadow_index].shadow_matrix4 * vec4(vertex_interp + normal_offset, 1.0);
+	normal_offset = base_normal_bias * shadow_data.shadow_normal_bias.z;
+	shadow_coord3 = shadow_data.shadow_matrix3 * vec4(vertex_interp + normal_offset, 1.0);
+	shadow_coord3.w = shadow_data.shadow_split_offsets.z;
+	normal_offset = base_normal_bias * shadow_data.shadow_normal_bias.w;
+	shadow_coord4 = shadow_data.shadow_matrix4 * vec4(vertex_interp + normal_offset, 1.0);
+	shadow_coord4.w = shadow_data.shadow_split_offsets.w;
 #endif //LIGHT_USE_PSSM4
 
 #endif // !(defined(ADDITIVE_OMNI) || defined(ADDITIVE_SPOT))
@@ -1267,6 +1323,8 @@ struct SceneData {
 	uint camera_visible_layers;
 	bool pancake_shadows;
 };
+
+#include "sdsm_scene_inc.glsl"
 
 layout(std140) uniform SceneDataBlock { // ubo:2
 	SceneData data;
@@ -2246,6 +2304,10 @@ vec4 textureArray_bicubic(sampler2DArray tex, vec3 uv, vec2 texture_size) {
 #endif // RENDER_MOTION_VECTORS
 
 void main() {
+	sdsm_scene_data = scene_data_block.data;
+#if defined(USE_SDSM) && defined(RENDER_SHADOWS)
+	sdsm_set_camera(sdsm_scene_data);
+#endif
 #ifndef RENDER_MOTION_VECTORS
 	//lay out everything, whatever is unused is optimized away anyway
 	vec3 vertex = vertex_interp;
@@ -2257,8 +2319,8 @@ void main() {
 #else
 	vec3 eye_offset = vec3(0.0, 0.0, 0.0);
 	vec3 view = -normalize(vertex_interp);
-	mat4 projection_matrix = scene_data_block.data.projection_matrix;
-	mat4 inv_projection_matrix = scene_data_block.data.inv_projection_matrix;
+	mat4 projection_matrix = sdsm_scene_data.projection_matrix;
+	mat4 inv_projection_matrix = sdsm_scene_data.inv_projection_matrix;
 #endif
 	highp mat4 model_matrix = world_transform;
 	vec3 albedo = vec3(1.0);
@@ -3041,16 +3103,16 @@ void main() {
 
 // Orthogonal shadows
 #if !defined(LIGHT_USE_PSSM2) && !defined(LIGHT_USE_PSSM4)
-		directional_shadow = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, shadow_coord);
+		directional_shadow = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, vec4(shadow_coord.xyz, 1.0));
 #endif // !defined(LIGHT_USE_PSSM2) && !defined(LIGHT_USE_PSSM4)
 
 // PSSM2 shadows
 #ifdef LIGHT_USE_PSSM2
 		float depth_z = -vertex.z;
-		vec4 light_split_offsets = directional_shadows[directional_shadow_index].shadow_split_offsets;
+		vec4 light_split_offsets = vec4(shadow_coord.w, shadow_coord2.w, shadow_coord2.w, shadow_coord2.w);
 		//take advantage of prefetch
-		float shadow1 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, shadow_coord);
-		float shadow2 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, shadow_coord2);
+		float shadow1 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, vec4(shadow_coord.xyz, 1.0));
+		float shadow2 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, vec4(shadow_coord2.xyz, 1.0));
 
 		if (depth_z < light_split_offsets.y) {
 
@@ -3083,12 +3145,12 @@ void main() {
 // PSSM4 shadows
 #ifdef LIGHT_USE_PSSM4
 		float depth_z = -vertex.z;
-		vec4 light_split_offsets = directional_shadows[directional_shadow_index].shadow_split_offsets;
+		vec4 light_split_offsets = vec4(shadow_coord.w, shadow_coord2.w, shadow_coord3.w, shadow_coord4.w);
 
-		float shadow1 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, shadow_coord);
-		float shadow2 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, shadow_coord2);
-		float shadow3 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, shadow_coord3);
-		float shadow4 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, shadow_coord4);
+		float shadow1 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, vec4(shadow_coord.xyz, 1.0));
+		float shadow2 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, vec4(shadow_coord2.xyz, 1.0));
+		float shadow3 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, vec4(shadow_coord3.xyz, 1.0));
+		float shadow4 = sample_shadow(directional_shadow_atlas, directional_shadows[directional_shadow_index].shadow_atlas_pixel_size, vec4(shadow_coord4.xyz, 1.0));
 
 		if (depth_z < light_split_offsets.w) {
 #ifdef LIGHT_USE_PSSM_BLEND

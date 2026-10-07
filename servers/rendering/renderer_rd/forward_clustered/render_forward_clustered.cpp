@@ -1746,6 +1746,9 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	uint32_t directional_light_count = 0;
 	uint32_t positional_light_count = 0;
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
+	if (sdsm != nullptr) {
+		light_storage->patch_sdsm_directional_lights(sdsm, *p_render_data->lights);
+	}
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
 
 	p_render_data->directional_light_count = directional_light_count;
@@ -2722,6 +2725,11 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 	ERR_FAIL_COND(!light_storage->owns_light_instance(p_light));
 
 	RID base = light_storage->light_instance_get_base_light(p_light);
+	const bool gpu_sdsm = sdsm != nullptr && sdsm->has_light(p_light);
+	if (gpu_sdsm) {
+		// The fitted cascade resolution is GPU-only; retain full shadow mesh detail.
+		p_screen_mesh_lod_threshold = 0.0f;
+	}
 
 	Rect2i atlas_rect;
 	uint32_t atlas_size = 1;
@@ -2904,6 +2912,10 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 	} else {
 		//render shadow
 		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
+		if (gpu_sdsm) {
+			const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[scene_state.shadow_passes.size() - 1];
+			sdsm->patch_scene_data(p_light, p_pass, scene_state.uniform_buffers[shadow_pass.uniform_buffer_index], 0, !flip_y);
+		}
 	}
 }
 

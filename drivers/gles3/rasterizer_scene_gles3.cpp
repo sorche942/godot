@@ -1774,6 +1774,8 @@ void RasterizerSceneGLES3::_setup_lights(const RenderDataGLES3 *p_render_data, b
 					index = MAX_DIRECTIONAL_LIGHTS - 1 - r_directional_shadow_count;
 				}
 				DirectionalLightData &light_data = scene_state.directional_lights[index];
+				sdsm_light_rows[index] = sdsm_active ? sdsm->get_light_index(lights[i]) * 4 : -1;
+				sdsm_directional_lights[index] = lights[i];
 
 				Transform3D light_transform = li->transform;
 
@@ -2238,6 +2240,13 @@ void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, 
 
 	RID base = light_storage->light_instance_get_base_light(p_light);
 
+	sdsm_shadow_row = -1;
+	if (sdsm_active && light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
+		int light_index = sdsm->get_light_index(p_light);
+		if (light_index >= 0) {
+			sdsm_shadow_row = light_index * 4 + p_pass;
+		}
+	}
 	float zfar = 0.0;
 	bool use_pancake = false;
 	float shadow_bias = 0.0;
@@ -2374,7 +2383,7 @@ void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, 
 
 	_setup_environment(&render_data, true, p_viewport_size, false, Color(), use_pancake, shadow_bias);
 
-	if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DISABLE_LOD) {
+	if (sdsm_shadow_row >= 0 || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DISABLE_LOD) {
 		render_data.screen_mesh_lod_threshold = 0.0;
 	} else {
 		render_data.screen_mesh_lod_threshold = p_screen_mesh_lod_threshold;
@@ -2410,6 +2419,9 @@ void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, 
 			SceneShaderGLES3::DISABLE_LIGHT_SPOT |
 			SceneShaderGLES3::DISABLE_FOG |
 			SceneShaderGLES3::RENDER_SHADOWS;
+	if (sdsm_shadow_row >= 0) {
+		spec_constant_base_flags |= SceneShaderGLES3::USE_SDSM;
+	}
 
 	if (light_storage->light_get_type(base) == RSE::LIGHT_OMNI) {
 		spec_constant_base_flags |= SceneShaderGLES3::RENDER_SHADOWS_LINEAR;
@@ -2418,6 +2430,7 @@ void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, 
 	RenderListParameters render_list_params(render_list[RENDER_LIST_SECONDARY].elements.ptr(), render_list[RENDER_LIST_SECONDARY].elements.size(), reverse_cull, spec_constant_base_flags, false);
 
 	_render_list_template<PASS_MODE_SHADOW>(&render_list_params, &render_data, 0, render_list[RENDER_LIST_SECONDARY].elements.size());
+	sdsm_shadow_row = -1;
 
 	glColorMask(1, 1, 1, 1);
 	scene_state.enable_gl_depth_test(false);
@@ -2442,7 +2455,7 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 	if (!sdsm) {
 		sdsm = memnew(GLES3::SDSM);
 	}
-	if (!sdsm->prepare(p_size, p_camera_data->view_count)) {
+	if (!sdsm->prepare(p_size, p_camera_data->view_count, p_render_data->render_region)) {
 		return;
 	}
 
@@ -2451,6 +2464,38 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 	depth_data.render_info = nullptr;
 	depth_data.render_region = Rect2i();
 	_fill_render_list(RENDER_LIST_SECONDARY, &depth_data, PASS_MODE_DEPTH);
+	// The fitted camera occupies the otherwise unused last scene texture unit.
+	// Preserve CSM for custom sampler arrays that actually occupy that unit.
+	const GLES3::Config *config = GLES3::Config::get_singleton();
+	const uint32_t sampler_limit = MIN(config->max_texture_image_units, config->max_vertex_texture_image_units) - 1;
+	auto samplers_fit = [sampler_limit](RenderGeometryInstance *p_instance, bool p_color) {
+		GeometryInstanceGLES3 *instance = static_cast<GeometryInstanceGLES3 *>(p_instance);
+		for (GeometryInstanceSurface *surface = instance->surface_caches; surface; surface = surface->next) {
+			if ((p_color && !surface->shader->unshaded && surface->shader->sdsm_texture_units > sampler_limit) ||
+					((surface->flags & GeometryInstanceSurface::FLAG_PASS_SHADOW) && surface->shader_shadow && surface->shader_shadow->sdsm_texture_units > sampler_limit)) {
+				WARN_PRINT_ONCE("Compatibility SDSM needs one free vertex texture sampler and scene texture unit. A material sampler array exceeds this device's SDSM sampler capability; reduce its sampler count to enable SDSM. Using CSM for this camera.");
+				return false;
+			}
+		}
+		return true;
+	};
+	for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
+		if (!samplers_fit((*p_render_data->instances)[i], true)) {
+			return;
+		}
+	}
+	for (int shadow = 0; shadow < p_render_data->render_shadow_count; shadow++) {
+		if (light_storage->light_instance_get_type(p_render_data->render_shadows[shadow].light) != RSE::LIGHT_DIRECTIONAL) {
+			continue;
+		}
+		const PagedArray<RenderGeometryInstance *> &instances = p_render_data->render_shadows[shadow].instances;
+		for (uint32_t i = 0; i < instances.size(); i++) {
+			if (!samplers_fit(instances[i], false)) {
+				return;
+			}
+		}
+	}
+	sdsm_active = true;
 	render_list[RENDER_LIST_SECONDARY].sort_by_key();
 	Vector<AABB> &extra_receivers = sdsm_extra_receivers;
 	int extra_receiver_count = 0;
@@ -2518,23 +2563,21 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 		_render_list_template<PASS_MODE_DEPTH>(&parameters, &depth_data, 0, render_list[RENDER_LIST_SECONDARY].elements.size());
 	}
 	glColorMask(1, 1, 1, 1);
-	Vector2 depth_range = sdsm->reduce_depth(inverse_projection, view_to_camera);
+	sdsm->reduce_depth(inverse_projection, view_to_camera);
 	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 		const RenderShadowData &shadow = p_render_data->render_shadows[i];
 		if (shadow.pass != 0 || light_storage->light_instance_get_type(shadow.light) != RSE::LIGHT_DIRECTIONAL) {
 			continue;
 		}
 		RendererSDSM::Light light;
-		if (!RendererSDSM::initialize_light(light, shadow.light, light_storage->light_instance_get_base_light(shadow.light),
+		if (!RendererSDSM::prepare_light(light, shadow.light, light_storage->light_instance_get_base_light(shadow.light),
 					light_storage->light_instance_get_base_transform(shadow.light), p_render_data->cam_projection,
-					p_render_data->cam_transform, p_render_data->cam_orthogonal, depth_range, extra_receivers,
+					p_render_data->cam_transform, p_render_data->cam_orthogonal,
 					p_render_data->render_shadows, p_render_data->render_shadow_count)) {
 			continue;
 		}
-		RendererSDSM::Bounds bounds[4];
-		sdsm->reduce_bounds(inverse_projection, view_to_camera, light, bounds);
-		RendererSDSM::include_extra_receivers(light, extra_receivers, bounds);
-		sdsm_fitter.apply_light(light, bounds, p_render_data->render_shadows);
+		const LocalVector<RendererSDSM::Caster> &casters = sdsm_fitter.collect_casters(light, p_render_data->render_shadows);
+		sdsm->fit_light(inverse_projection, view_to_camera, light, extra_receivers, casters);
 	}
 	scene_state.reset_gl_state();
 }
@@ -2715,6 +2758,7 @@ void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_
 		// If we're rendering right-side up, then we need to change the winding order.
 		glFrontFace(GL_CW);
 	}
+	sdsm_active = false;
 	if (RendererSDSM::is_enabled()) {
 		_update_sdsm(&render_data, p_camera_data, screen_size, flip_y);
 	}
@@ -3889,6 +3933,11 @@ void RasterizerSceneGLES3::_render_list_template(RenderListParameters *p_params,
 				}
 			}
 
+			if constexpr (p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_COLOR_TRANSPARENT) {
+				if (sdsm_active && uses_additive_lighting && pass >= int32_t(inst->light_passes.size())) {
+					spec_constants |= SceneShaderGLES3::USE_SDSM;
+				}
+			}
 			if (prev_shader != shader || prev_variant != instance_variant || spec_constants != prev_spec_constants) {
 				bool success = material_storage->shaders.scene_shader.version_bind_shader(shader->version, instance_variant, spec_constants);
 				if (!success) {
@@ -3903,6 +3952,13 @@ void RasterizerSceneGLES3::_render_list_template(RenderListParameters *p_params,
 				}
 
 				material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::OPAQUE_PREPASS_THRESHOLD, opaque_prepass_threshold, shader->version, instance_variant, spec_constants);
+			}
+			if (spec_constants & SceneShaderGLES3::USE_SDSM) {
+				glActiveTexture(GL_TEXTURE0 + config->max_texture_image_units - 1);
+				glBindTexture(GL_TEXTURE_2D, sdsm->get_camera_texture());
+				material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::SDSM_SHADOW_ROW, sdsm_shadow_row, shader->version, instance_variant, spec_constants);
+				material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::SDSM_LIGHT_ROW, -1, shader->version, instance_variant, spec_constants);
+				material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::SDSM_CAMERA_ORIGIN, p_render_data->main_cam_transform.origin, shader->version, instance_variant, spec_constants);
 			}
 
 			// Pass in lighting uniforms.
@@ -3931,6 +3987,15 @@ void RasterizerSceneGLES3::_render_list_template(RenderListParameters *p_params,
 					} else {
 						uint32_t shadow_id = MAX_DIRECTIONAL_LIGHTS - 1 - (pass - int32_t(inst->light_passes.size()));
 						material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::DIRECTIONAL_SHADOW_INDEX, shadow_id, shader->version, instance_variant, spec_constants);
+						if (spec_constants & SceneShaderGLES3::USE_SDSM) {
+							material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::SDSM_LIGHT_ROW, sdsm_light_rows[shadow_id], shader->version, instance_variant, spec_constants);
+							Projection atlas_rects;
+							for (int cascade = 0; cascade < 4; cascade++) {
+								Rect2 rect = GLES3::LightStorage::get_singleton()->light_instance_get_directional_shadow_atlas_rect(sdsm_directional_lights[shadow_id], cascade);
+								atlas_rects.columns[cascade] = Vector4(rect.position.x, rect.position.y, rect.size.x, rect.size.y);
+							}
+							material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::SDSM_ATLAS_RECTS, atlas_rects, shader->version, instance_variant, spec_constants);
+						}
 
 						GLuint tex = GLES3::LightStorage::get_singleton()->directional_shadow_get_texture();
 						glActiveTexture(GL_TEXTURE0 + config->max_texture_image_units - 3);
@@ -4135,6 +4200,11 @@ void RasterizerSceneGLES3::_render_list_template(RenderListParameters *p_params,
 			}
 
 			material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::WORLD_TRANSFORM, world_transform, shader->version, instance_variant, spec_constants);
+			if constexpr (p_pass_mode == PASS_MODE_SHADOW) {
+				if (spec_constants & SceneShaderGLES3::USE_SDSM) {
+					material_storage->shaders.scene_shader.version_set_uniform(SceneShaderGLES3::SDSM_MODEL_ORIGIN, world_transform.origin - p_render_data->main_cam_transform.origin, shader->version, instance_variant, spec_constants);
+				}
+			}
 			{
 				GLES3::Mesh::Surface *s = reinterpret_cast<GLES3::Mesh::Surface *>(surf->surface);
 				if (s->format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) {

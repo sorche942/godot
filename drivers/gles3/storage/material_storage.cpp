@@ -1259,8 +1259,8 @@ MaterialStorage::MaterialStorage() {
 
 		actions.renames["MODEL_MATRIX"] = "model_matrix";
 		actions.renames["MODEL_NORMAL_MATRIX"] = "model_normal_matrix";
-		actions.renames["VIEW_MATRIX"] = "scene_data_block.data.view_matrix";
-		actions.renames["INV_VIEW_MATRIX"] = "scene_data_block.data.inv_view_matrix";
+		actions.renames["VIEW_MATRIX"] = "sdsm_scene_data.view_matrix";
+		actions.renames["INV_VIEW_MATRIX"] = "sdsm_scene_data.inv_view_matrix";
 		actions.renames["PROJECTION_MATRIX"] = "projection_matrix";
 		actions.renames["INV_PROJECTION_MATRIX"] = "inv_projection_matrix";
 		actions.renames["MODELVIEW_MATRIX"] = "modelview";
@@ -1338,10 +1338,10 @@ MaterialStorage::MaterialStorage() {
 		actions.renames["LIGHT_VERTEX"] = "light_vertex";
 
 		actions.renames["NODE_POSITION_WORLD"] = "model_matrix[3].xyz";
-		actions.renames["CAMERA_POSITION_WORLD"] = "scene_data_block.data.inv_view_matrix[3].xyz";
-		actions.renames["CAMERA_DIRECTION_WORLD"] = "scene_data_block.data.inv_view_matrix[2].xyz";
+		actions.renames["CAMERA_POSITION_WORLD"] = "sdsm_scene_data.inv_view_matrix[3].xyz";
+		actions.renames["CAMERA_DIRECTION_WORLD"] = "sdsm_scene_data.inv_view_matrix[2].xyz";
 		actions.renames["CAMERA_VISIBLE_LAYERS"] = "scene_data_block.data.camera_visible_layers";
-		actions.renames["NODE_POSITION_VIEW"] = "(scene_data_block.data.view_matrix * model_matrix)[3].xyz";
+		actions.renames["NODE_POSITION_VIEW"] = "(sdsm_scene_data.view_matrix * model_matrix)[3].xyz";
 
 		actions.renames["IS_MULTIVIEW"] = "OUTPUT_IS_MULTIVIEW";
 		actions.renames["VIEW_INDEX"] = "ViewIndex";
@@ -2967,6 +2967,7 @@ void SceneShaderData::set_code(const String &p_code) {
 	code = p_code;
 	valid = false;
 	ubo_size = 0;
+	sdsm_texture_units = 0;
 	uniforms.clear();
 
 	uses_point_size = false;
@@ -3198,6 +3199,9 @@ void SceneShaderData::set_code(const String &p_code) {
 #endif
 
 	LocalVector<ShaderGLES3::TextureUniformData> texture_uniform_data = get_texture_uniform_data(gen_code.texture_uniforms);
+	for (const ShaderGLES3::TextureUniformData &texture : texture_uniform_data) {
+		sdsm_texture_units += texture.array_size;
+	}
 
 	MaterialStorage::get_singleton()->shaders.scene_shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines, texture_uniform_data);
 	ERR_FAIL_COND(!MaterialStorage::get_singleton()->shaders.scene_shader.version_is_valid(version));

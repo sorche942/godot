@@ -503,7 +503,7 @@ RID RenderForwardMobile::_setup_render_pass_uniform_set(RenderListType p_render_
 	{
 		RD::Uniform u;
 		u.binding = 0;
-		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC;
+		u.uniform_type = RendererSDSM::is_enabled() ? RD::UNIFORM_TYPE_UNIFORM_BUFFER : RD::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		// Negative on purpose. We've created multiple uniform_buffers by calling prepare_for_upload()
 		// many times in a row, now we must reference those.
 		// We use 0u - p_pass_offset instead of -p_pass_offset to make MSVC warnings shut up.
@@ -1213,8 +1213,9 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 
 	_pre_opaque_render(p_render_data);
 	if (using_sdsm) {
-		// Mobile pairs lights before constructing its render lists; publish the fitted matrices again.
+		// Shadow setup has now assigned this camera's directional atlas rectangles.
 		light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
+		light_storage->patch_sdsm_directional_lights(sdsm, *p_render_data->lights);
 	}
 
 	SceneShaderForwardMobile::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -1472,6 +1473,11 @@ void RenderForwardMobile::_render_shadow_pass(RID p_light, RID p_shadow_atlas, i
 	ERR_FAIL_COND(!light_storage->owns_light_instance(p_light));
 
 	RID base = light_storage->light_instance_get_base_light(p_light);
+	const bool gpu_sdsm = sdsm != nullptr && sdsm->has_light(p_light);
+	if (gpu_sdsm) {
+		// The fitted cascade resolution is GPU-only; retain full shadow mesh detail.
+		p_screen_mesh_lod_threshold = 0.0f;
+	}
 
 	Rect2i atlas_rect;
 	uint32_t atlas_size = 1;
@@ -1650,6 +1656,11 @@ void RenderForwardMobile::_render_shadow_pass(RID p_light, RID p_shadow_atlas, i
 	} else {
 		//render shadow
 		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_main_cam_transform);
+		if (gpu_sdsm) {
+			// GPU-writable scene buffers use distinct, ordinary backing UBOs.
+			// update_ubo has completed its staging upload and the backing offset is zero.
+			sdsm->patch_scene_data(p_light, p_pass, scene_state.uniform_buffers._get(0u), 0, !flip_y);
+		}
 	}
 }
 
@@ -2444,7 +2455,7 @@ void RenderForwardMobile::_setup_environment(const RenderDataRD *p_render_data, 
 
 	// May do this earlier in RenderSceneRenderRD::render_scene
 	if (scene_state.uniform_buffers.get_size(0u) == 0u) {
-		scene_state.uniform_buffers.set_uniform_size(0u, p_render_data->scene_data->get_uniform_buffer_size_bytes());
+		scene_state.uniform_buffers.set_uniform_size(0u, p_render_data->scene_data->get_uniform_buffer_size_bytes(), RendererSDSM::is_enabled());
 	}
 
 	float luminance_multiplier = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_luminance_multiplier() : 1.0;

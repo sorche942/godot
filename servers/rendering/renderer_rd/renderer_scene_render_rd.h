@@ -257,6 +257,11 @@ public:
 	virtual void gi_set_use_half_resolution(bool p_enable) override;
 
 	RID render_buffers_get_default_voxel_gi_buffer();
+	void free_sdsm_light(RID p_light) {
+		if (sdsm != nullptr) {
+			sdsm->free_light(p_light);
+		}
+	}
 
 	virtual void base_uniforms_changed() = 0;
 

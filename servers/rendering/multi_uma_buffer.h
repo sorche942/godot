@@ -285,6 +285,7 @@ class MultiUmaBuffer : public MultiUmaBufferBase {
 	struct BufferInfo {
 		uint32_t size_bytes = 0;
 		MultiUmaBufferType type = MultiUmaBufferType::UNIFORM;
+		bool gpu_writable = false;
 	};
 	BufferInfo buffer_info[NUM_BUFFERS];
 #ifdef DEV_ENABLED
@@ -305,7 +306,9 @@ class MultiUmaBuffer : public MultiUmaBufferBase {
 					break;
 				case MultiUmaBufferType::UNIFORM:
 				default:
-					buffer = rd->uniform_buffer_create(info.size_bytes, Vector<uint8_t>(), RD::BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT);
+					// GPU-written uniforms use ordinary tracked storage. Persistent UMA
+					// suballocations may advance between upload and compute binding.
+					buffer = rd->uniform_buffer_create(info.size_bytes, Vector<uint8_t>(), info.gpu_writable ? RD::BUFFER_CREATION_AS_STORAGE_BIT : RD::BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT);
 					break;
 			}
 			buffers.push_back(buffer);
@@ -322,6 +325,7 @@ public:
 		DEV_ASSERT(buffers.is_empty());
 		buffer_info[p_idx].size_bytes = p_size_bytes;
 		buffer_info[p_idx].type = p_type;
+		buffer_info[p_idx].gpu_writable = false;
 		curr_idx = UINT32_MAX;
 		last_frame_mapped = UINT64_MAX;
 	}
@@ -330,8 +334,9 @@ public:
 		set_size(p_idx, p_size_bytes, p_is_storage ? MultiUmaBufferType::STORAGE : MultiUmaBufferType::UNIFORM);
 	}
 
-	void set_uniform_size(uint32_t p_idx, uint32_t p_size_bytes) {
+	void set_uniform_size(uint32_t p_idx, uint32_t p_size_bytes, bool p_gpu_writable = false) {
 		set_size(p_idx, p_size_bytes, MultiUmaBufferType::UNIFORM);
+		buffer_info[p_idx].gpu_writable = p_gpu_writable;
 	}
 
 	void set_storage_size(uint32_t p_idx, uint32_t p_size_bytes) {

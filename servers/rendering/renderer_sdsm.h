@@ -34,21 +34,13 @@
 #include "core/templates/local_vector.h"
 #include "servers/rendering/renderer_scene_render.h"
 
-// Backend-independent partition placement and shadow-camera fitting. GPU backends
-// supply current-frame depth extrema and per-partition receiver bounds.
+// Prepare camera-relative inputs and conservative CPU caster lists. Partition
+// placement and shadow-camera fitting remain entirely on the GPU.
 class RendererSDSM {
+public:
 	struct Caster {
 		RenderGeometryInstance *instance = nullptr;
 		AABB bounds;
-	};
-
-	HashSet<RenderGeometryInstance *> caster_set;
-	LocalVector<Caster> casters;
-
-public:
-	struct Bounds {
-		AABB aabb;
-		bool valid = false;
 	};
 
 	struct Light {
@@ -57,7 +49,9 @@ public:
 		Transform3D light_to_world;
 		Projection camera_projection;
 		Transform3D camera_transform;
-		float distances[5] = {};
+		float camera_near = 0.0f;
+		float camera_far = 0.0f;
+		float shadow_far = 0.0f;
 		int shadow_indices[4] = { -1, -1, -1, -1 };
 		uint32_t cascade_count = 0;
 		bool blend_splits = false;
@@ -65,12 +59,13 @@ public:
 	};
 
 	static bool is_enabled();
+	static bool prepare_light(Light &r_light, RID p_instance, RID p_base, const Transform3D &p_light_transform, const Projection &p_camera_projection, const Transform3D &p_camera_transform, bool p_orthogonal, RendererSceneRender::RenderShadowData *p_shadows, int p_shadow_count);
 
-	// Extra receivers cover transparent and other surfaces absent from camera depth.
-	// Their world-space bounds contribute to both depth placement and receiver fitting.
-	static bool initialize_light(Light &r_light, RID p_instance, RID p_base, const Transform3D &p_light_transform, const Projection &p_camera_projection, const Transform3D &p_camera_transform, bool p_orthogonal, const Vector2 &p_depth_range, const Vector<AABB> &p_extra_receivers, RendererSceneRender::RenderShadowData *p_shadows, int p_shadow_count);
-	static float get_cascade_begin(const Light &p_light, uint32_t p_cascade);
-	static void include_extra_receivers(const Light &p_light, const Vector<AABB> &p_extra_receivers, Bounds *r_bounds);
-	static void include_camera_volume(const Light &p_light, real_t p_length, Bounds *r_bounds);
-	void apply_light(const Light &p_light, const Bounds *p_bounds, RendererSceneRender::RenderShadowData *p_shadows);
+	// GPU-selected split boundaries may cross every original CSM interval.
+	// Each cascade therefore needs their union; the fitted GPU camera clips it.
+	const LocalVector<Caster> &collect_casters(const Light &p_light, RendererSceneRender::RenderShadowData *p_shadows);
+
+private:
+	HashSet<RenderGeometryInstance *> caster_set;
+	LocalVector<Caster> casters;
 };

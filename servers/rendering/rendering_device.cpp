@@ -4411,6 +4411,9 @@ RID RenderingDevice::uniform_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 	if (p_creation_bits.has_flag(BUFFER_CREATION_DEVICE_ADDRESS_BIT)) {
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT);
 	}
+	if (p_creation_bits.has_flag(BUFFER_CREATION_AS_STORAGE_BIT)) {
+		buffer.usage.set_flag(RDD::BUFFER_USAGE_STORAGE_BIT);
+	}
 	if (p_creation_bits.has_flag(BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT)) {
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
 
@@ -4426,8 +4429,9 @@ RID RenderingDevice::uniform_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 	buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, buffer.alloc_type, frames_drawn);
 	ERR_FAIL_COND_V(!buffer.driver_id, RID());
 
-	// Uniform buffers are assumed to be immutable unless they don't have initial data.
-	if (p_data.is_empty()) {
+	// GPU-writable uniform buffers must participate in resource tracking even
+	// when initialized at creation.
+	if (p_data.is_empty() || p_creation_bits.has_flag(BUFFER_CREATION_AS_STORAGE_BIT)) {
 		buffer.draw_tracker = RDG::resource_tracker_create();
 		buffer.draw_tracker->buffer_driver_id = buffer.driver_id;
 	}
@@ -4811,6 +4815,10 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 					buffer = index_buffer_owner.get_or_null(buffer_id);
 
 					ERR_FAIL_COND_V_MSG(!(buffer->usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT)), RID(), "Index buffer supplied (binding: " + itos(uniform.binding) + ") was not created with storage flag.");
+				} else if (uniform_buffer_owner.owns(buffer_id)) {
+					buffer = uniform_buffer_owner.get_or_null(buffer_id);
+
+					ERR_FAIL_COND_V_MSG(!(buffer->usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT)), RID(), "Uniform buffer supplied (binding: " + itos(uniform.binding) + ") was not created with storage flag.");
 				}
 				ERR_FAIL_NULL_V_MSG(buffer, RID(), "Storage buffer supplied (binding: " + itos(uniform.binding) + ") is invalid.");
 

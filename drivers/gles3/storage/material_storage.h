@@ -293,6 +293,7 @@ struct SceneShaderData : public ShaderData {
 	RID version;
 
 	Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
+	uint32_t sdsm_texture_units = 0;
 
 	Vector<uint32_t> ubo_offsets;
 	uint32_t ubo_size;

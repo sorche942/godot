@@ -35,6 +35,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
 
+#include <cstddef>
+
 Transform3D RenderSceneDataRD::get_cam_transform() const {
 	return cam_transform;
 }
@@ -68,7 +70,32 @@ Projection RenderSceneDataRD::get_view_projection(uint32_t p_view) const {
 }
 
 RID RenderSceneDataRD::create_uniform_buffer() {
-	return RD::get_singleton()->uniform_buffer_create(sizeof(UBODATA));
+	// SDSM patches the existing material ABI by word offset, without an
+	// alternative shader-visible camera layout. Keep its constants honest.
+	static_assert(RendererSceneRender::MAX_RENDER_VIEWS == 2);
+	static_assert(offsetof(UBODATA, ubo) == 0);
+	static_assert(offsetof(UBO, projection_matrix) == 0);
+	static_assert(offsetof(UBO, inv_projection_matrix) == 16 * sizeof(float));
+	static_assert(offsetof(UBO, inv_view_matrix) == 32 * sizeof(float));
+	static_assert(offsetof(UBO, view_matrix) == 44 * sizeof(float));
+#ifdef REAL_T_IS_DOUBLE
+	static_assert(offsetof(UBO, inv_view_precision) == 56 * sizeof(float));
+	static_assert(offsetof(UBO, projection_matrix_view) == 60 * sizeof(float));
+#else
+	static_assert(offsetof(UBO, projection_matrix_view) == 56 * sizeof(float));
+#endif
+	static_assert(offsetof(UBO, inv_projection_matrix_view) == offsetof(UBO, projection_matrix_view) + 32 * sizeof(float));
+	static_assert(offsetof(UBO, eye_offset) == offsetof(UBO, projection_matrix_view) + 64 * sizeof(float));
+	static_assert(sizeof(UBO::directional_penumbra_shadow_kernel) == 128 * sizeof(float));
+	static_assert(sizeof(UBO::directional_soft_shadow_kernel) == 128 * sizeof(float));
+	static_assert(sizeof(UBO::penumbra_shadow_kernel) == 128 * sizeof(float));
+	static_assert(sizeof(UBO::soft_shadow_kernel) == 128 * sizeof(float));
+	static_assert(offsetof(UBO, z_far) == offsetof(UBO, projection_matrix_view) + 614 * sizeof(float));
+	static_assert(offsetof(UBO, z_near) == offsetof(UBO, projection_matrix_view) + 615 * sizeof(float));
+	static_assert(sizeof(UBO) == offsetof(UBO, projection_matrix_view) + 660 * sizeof(float));
+	static_assert(offsetof(UBODATA, prev_ubo) == sizeof(UBO));
+	static_assert(sizeof(UBODATA) == 2 * sizeof(UBO));
+	return RD::get_singleton()->uniform_buffer_create(sizeof(UBODATA), {}, RendererSDSM::is_enabled() ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0);
 }
 
 void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RSE::ViewportDebugDraw p_debug_mode, RID p_env, RID p_reflection_probe_instance, RID p_camera_attributes, bool p_pancake_shadows, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, float p_luminance_multiplier, bool p_opaque_render_buffers, bool p_apply_alpha_multiplier) {
