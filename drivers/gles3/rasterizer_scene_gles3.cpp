@@ -2506,6 +2506,10 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 	for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
 		GeometryInstanceGLES3 *instance = static_cast<GeometryInstanceGLES3 *>((*p_render_data->instances)[i]);
 		for (GeometryInstanceSurface *surface = instance->surface_caches; surface; surface = surface->next) {
+			// Unshaded overlays (notably the editor grid) never receive shadows.
+			if (surface->shader->unshaded) {
+				continue;
+			}
 			if (conservative_msaa || (surface->flags & GeometryInstanceSurface::FLAG_PASS_ALPHA) ||
 					!(surface->flags & GeometryInstanceSurface::FLAG_PASS_DEPTH) ||
 					surface->shader->depth_draw == GLES3::SceneShaderData::DEPTH_DRAW_DISABLED ||

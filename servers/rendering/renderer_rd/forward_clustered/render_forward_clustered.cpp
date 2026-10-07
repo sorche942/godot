@@ -2281,6 +2281,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		for (uint32_t i = 0; i < p_render_data->instances->size(); i++) {
 			const GeometryInstanceForwardClustered *instance = static_cast<const GeometryInstanceForwardClustered *>((*p_render_data->instances)[i]);
 			for (const GeometryInstanceSurfaceDataCache *surface = instance->surface_caches; surface; surface = surface->next) {
+				// Unshaded overlays (notably the editor grid) never receive shadows.
+				if (surface->shader->unshaded) {
+					continue;
+				}
 				if ((surface->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA | GeometryInstanceSurfaceDataCache::FLAG_USES_STENCIL)) || !(surface->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH) || surface->color_pass_inclusion_mask == COLOR_PASS_FLAG_TRANSPARENT || surface->shader->writes_modelview_or_projection || surface->shader->uses_position || surface->shader->writes_depth || surface->shader->uses_z_clip_scale || using_motion_pass) {
 					sdsm_extra_receivers.write[extra_receiver_count++] = instance->transformed_aabb;
 					break;

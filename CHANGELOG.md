@@ -12,6 +12,7 @@ branches, and linked at the [end of this file](#Past-releases).
 - Rendering: Add Intel-style Sample Distribution Shadow Maps for directional lights, selectable alongside regular cascaded shadows in Project Settings.
 - Rendering: Fix directional shadow blur, PCF kernel scaling, and PCSS penumbra normalization in SDSM mode.
 - Rendering: Keep SDSM cascade partitioning, fitting, and shadow transforms GPU-resident across Forward+, Mobile, and Compatibility, removing synchronous depth/bounds readbacks.
+- Rendering: Fix missing SDSM shadows in the 3D editor by excluding unshaded grids and gizmos from conservative shadow-receiver bounds across all rendering methods.
 
 ## 4.7 - 2026-06-18
 
