@@ -41,6 +41,7 @@ class RenderSceneDataRD : public RenderSceneData {
 
 public:
 	bool calculate_motion_vectors = false;
+	bool sdsm_enabled = false;
 
 	Transform3D cam_transform;
 	Projection cam_projection;
@@ -112,6 +113,7 @@ private:
 		SCENE_DATA_FLAGS_USE_UV2_MATERIAL = 1 << 6,
 		SCENE_DATA_FLAGS_USE_PANCAKE_SHADOWS = 1 << 7,
 		SCENE_DATA_FLAGS_IN_SHADOW_PASS = 1 << 8, // Only used by Forward+ renderer.
+		SCENE_DATA_FLAGS_USE_SDSM_SHADOWS = 1 << 9,
 		SCENE_DATA_FLAGS_MAX
 	};
 

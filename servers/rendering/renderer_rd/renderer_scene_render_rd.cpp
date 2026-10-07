@@ -1362,7 +1362,7 @@ void RendererSceneRenderRD::_post_prepass_render(RenderDataRD *p_render_data, bo
 }
 
 bool RendererSceneRenderRD::_sdsm_needed(const RenderDataRD *p_render_data) const {
-	if (!RendererSDSM::is_enabled()) {
+	if (!p_render_data->scene_data->sdsm_enabled) {
 		return false;
 	}
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -1441,6 +1441,7 @@ void RendererSceneRenderRD::_process_sdsm(RenderDataRD *p_render_data, const Vec
 }
 
 void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data, RenderingServerTypes::RenderInfo *r_render_info) {
+	// Fitted lights belong to this camera only, including when switching back to CSM.
 	if (sdsm != nullptr) {
 		sdsm->begin_frame();
 	}
@@ -1457,6 +1458,8 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 
 	// setup scene data
 	RenderSceneDataRD scene_data;
+	scene_data.sdsm_enabled = RendererSDSM::is_enabled();
+	// All passes and filtering for this camera use the same live mode snapshot.
 	{
 		// Our first camera is used by default
 		scene_data.cam_transform = p_camera_data->main_transform;

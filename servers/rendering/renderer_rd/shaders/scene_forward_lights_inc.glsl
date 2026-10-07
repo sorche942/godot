@@ -433,14 +433,15 @@ half sample_directional_soft_shadow(texture2D shadow, vec3 pssm_coord, vec2 tex_
 	if (blocker_count > 0.0) {
 		//blockers found, do soft shadow
 		blocker_average /= blocker_count;
-#ifdef USE_SDSM_SHADOWS
-		// Orthographic penumbra size depends on receiver-to-blocker separation.
-		// The search radius already spans near plane to receiver; dividing by
-		// near plane to blocker would amplify it as SDSM tightly fits that plane.
-		float penumbra = (blocker_average - pssm_coord.z) / max(1.0 - pssm_coord.z, 0.000001);
-#else
-		float penumbra = (-pssm_coord.z + blocker_average) / (1.0 - blocker_average);
-#endif
+		float penumbra;
+		if (bool(scene_data_block.data.flags & SCENE_DATA_FLAGS_USE_SDSM_SHADOWS)) {
+			// Orthographic penumbra size depends on receiver-to-blocker separation.
+			// The search radius already spans near plane to receiver; dividing by
+			// near plane to blocker would amplify it as SDSM tightly fits that plane.
+			penumbra = (blocker_average - pssm_coord.z) / max(1.0 - pssm_coord.z, 0.000001);
+		} else {
+			penumbra = (-pssm_coord.z + blocker_average) / (1.0 - blocker_average);
+		}
 		tex_scale *= penumbra;
 
 		float s = 0.0;

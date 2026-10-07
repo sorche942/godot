@@ -37,7 +37,6 @@
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
-#include "servers/rendering/renderer_sdsm.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_default.h"
 #include "servers/rendering/storage/ltc_lut.gen.h"
@@ -503,7 +502,7 @@ RID RenderForwardMobile::_setup_render_pass_uniform_set(RenderListType p_render_
 	{
 		RD::Uniform u;
 		u.binding = 0;
-		u.uniform_type = RendererSDSM::is_enabled() ? RD::UNIFORM_TYPE_UNIFORM_BUFFER : RD::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC;
+		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
 		// Negative on purpose. We've created multiple uniform_buffers by calling prepare_for_upload()
 		// many times in a row, now we must reference those.
 		// We use 0u - p_pass_offset instead of -p_pass_offset to make MSVC warnings shut up.
@@ -2459,7 +2458,8 @@ void RenderForwardMobile::_setup_environment(const RenderDataRD *p_render_data, 
 
 	// May do this earlier in RenderSceneRenderRD::render_scene
 	if (scene_state.uniform_buffers.get_size(0u) == 0u) {
-		scene_state.uniform_buffers.set_uniform_size(0u, p_render_data->scene_data->get_uniform_buffer_size_bytes(), RendererSDSM::is_enabled());
+		// Keep scene UBO backing and descriptor layout independent of the live shadow mode.
+		scene_state.uniform_buffers.set_uniform_size(0u, p_render_data->scene_data->get_uniform_buffer_size_bytes(), true);
 	}
 
 	float luminance_multiplier = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_luminance_multiplier() : 1.0;
@@ -3681,9 +3681,6 @@ RenderForwardMobile::RenderForwardMobile() {
 	}
 	// defines += "\n#define SDFGI_OCT_SIZE " + itos(gi.sdfgi_get_lightprobe_octahedron_size()) + "\n";
 	defines += "\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "\n";
-	if (RendererSDSM::is_enabled()) {
-		defines += "\n#define USE_SDSM_SHADOWS\n";
-	}
 
 	bool force_vertex_shading = GLOBAL_GET("rendering/shading/overrides/force_vertex_shading");
 	if (force_vertex_shading) {

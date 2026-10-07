@@ -35,7 +35,6 @@
 #include "servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
-#include "servers/rendering/renderer_sdsm.h"
 
 using namespace RendererSceneRenderImplementation;
 
@@ -636,11 +635,7 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 		immutable_shadow_sampler.uniform_type = RenderingDeviceCommons::UNIFORM_TYPE_SAMPLER;
 		immutable_samplers.push_back(immutable_shadow_sampler);
 		Vector<uint64_t> dynamic_buffers;
-		// GPU-patched scene uniforms use tracked non-persistent backing buffers;
-		// only CSM scene uniforms require the driver's UMA dynamic offset.
-		if (!RendererSDSM::is_enabled()) {
-			dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardMobile::RENDER_PASS_UNIFORM_SET, 0));
-		}
+		// Scene uniforms always use tracked GPU-writable backing buffers without dynamic offsets.
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardMobile::RENDER_PASS_UNIFORM_SET, 1));
 		shader.initialize(shader_versions, p_defines, immutable_samplers, dynamic_buffers);
 

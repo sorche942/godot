@@ -1825,7 +1825,7 @@ void RasterizerSceneGLES3::_setup_lights(const RenderDataGLES3 *p_render_data, b
 					int limit = shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL ? 0 : (shadow_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 1 : 3);
 
 					shadow_data.shadow_atlas_pixel_size = 1.0 / light_storage->directional_shadow_get_size();
-					if (RendererSDSM::is_enabled()) {
+					if (sdsm_light_rows[index] >= 0) {
 						shadow_data.shadow_atlas_pixel_size *= MAX(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BLUR), 0.0f);
 					}
 
@@ -2495,7 +2495,6 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 			}
 		}
 	}
-	sdsm_active = true;
 	render_list[RENDER_LIST_SECONDARY].sort_by_key();
 	Vector<AABB> &extra_receivers = sdsm_extra_receivers;
 	int extra_receiver_count = 0;
@@ -2581,7 +2580,9 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 			continue;
 		}
 		const LocalVector<RendererSDSM::Caster> &casters = sdsm_fitter.collect_casters(light, p_render_data->render_shadows);
-		sdsm->fit_light(inverse_projection, view_to_camera, light, extra_receivers, casters);
+		if (sdsm->fit_light(inverse_projection, view_to_camera, light, extra_receivers, casters)) {
+			sdsm_active = true;
+		}
 	}
 	scene_state.reset_gl_state();
 }
@@ -2590,6 +2591,11 @@ void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	GLES3::Config *config = GLES3::Config::get_singleton();
 	RENDER_TIMESTAMP("Setup 3D Scene");
+	// All passes for this camera use one mode snapshot. Capability fallbacks
+	// below also select CSM filtering, rather than only CSM shadow matrices.
+	const bool sdsm_enabled = RendererSDSM::is_enabled();
+	sdsm_active = false;
+	sdsm_shadow_row = -1;
 
 	bool apply_environment_effects_in_post = false;
 	bool is_reflection_probe = p_reflection_probe.is_valid();
@@ -2762,8 +2768,7 @@ void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_
 		// If we're rendering right-side up, then we need to change the winding order.
 		glFrontFace(GL_CW);
 	}
-	sdsm_active = false;
-	if (RendererSDSM::is_enabled()) {
+	if (sdsm_enabled) {
 		_update_sdsm(&render_data, p_camera_data, screen_size, flip_y);
 	}
 	_render_shadows(&render_data, screen_size);

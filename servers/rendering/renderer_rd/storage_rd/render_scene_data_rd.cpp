@@ -95,7 +95,7 @@ RID RenderSceneDataRD::create_uniform_buffer() {
 	static_assert(sizeof(UBO) == offsetof(UBO, projection_matrix_view) + 660 * sizeof(float));
 	static_assert(offsetof(UBODATA, prev_ubo) == sizeof(UBO));
 	static_assert(sizeof(UBODATA) == 2 * sizeof(UBO));
-	return RD::get_singleton()->uniform_buffer_create(sizeof(UBODATA), {}, RendererSDSM::is_enabled() ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0);
+	return RD::get_singleton()->uniform_buffer_create(sizeof(UBODATA), {}, RD::BUFFER_CREATION_AS_STORAGE_BIT);
 }
 
 void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RSE::ViewportDebugDraw p_debug_mode, RID p_env, RID p_reflection_probe_instance, RID p_camera_attributes, bool p_pancake_shadows, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, float p_luminance_multiplier, bool p_opaque_render_buffers, bool p_apply_alpha_multiplier) {
@@ -145,7 +145,7 @@ void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RSE::ViewportDebugDraw 
 	ubo.z_far = z_far;
 	ubo.z_near = z_near;
 
-	ubo.flags = 0;
+	ubo.flags = sdsm_enabled ? SCENE_DATA_FLAGS_USE_SDSM_SHADOWS : 0;
 
 	ubo.flags |= p_pancake_shadows ? SCENE_DATA_FLAGS_USE_PANCAKE_SHADOWS : 0;
 
