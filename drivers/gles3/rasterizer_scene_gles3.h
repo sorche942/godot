@@ -460,6 +460,9 @@ private:
 			float luminance_multiplier;
 			uint32_t camera_visible_layers;
 			bool pancake_shadows;
+			uint32_t debug_cascade_distribution[4] = {};
+			float debug_cascade_splits[MAX_DIRECTIONAL_LIGHTS][4] = {};
+			uint32_t debug_cascade_metadata[MAX_DIRECTIONAL_LIGHTS][4] = {};
 		};
 		static_assert(sizeof(UBO) % 16 == 0, "Scene UBO size must be a multiple of 16 bytes");
 		static_assert(sizeof(UBO) < 16384, "Scene UBO size must be 16384 bytes or smaller");

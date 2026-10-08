@@ -9,11 +9,13 @@ branches, and linked at the [end of this file](#Past-releases).
 
 ## 4.8 - Unreleased
 
-- Rendering: Add Intel-style Sample Distribution Shadow Maps for directional lights, selectable alongside regular cascaded shadows in Project Settings.
-- Rendering: Fix directional shadow blur, PCF kernel scaling, and PCSS penumbra normalization in SDSM mode.
-- Rendering: Keep SDSM cascade partitioning, fitting, and shadow transforms GPU-resident across Forward+, Mobile, and Compatibility, removing synchronous depth/bounds readbacks.
-- Rendering: Fix missing SDSM shadows in the 3D editor by excluding unshaded grids and gizmos from conservative shadow-receiver bounds across all rendering methods.
-- Rendering: Allow live switching between CSM and SDSM in Project Settings and at runtime across all rendering methods, without an editor restart.
+- Rendering: Add Automatic Cascade Distribution, based on Intel's Sample Distribution Shadow Maps method. Project Settings exposes Cascade Distribution with Manual (default) and Automatic options.
+- Rendering: Preserve directional shadow blur, PCF kernel scaling, and PCSS penumbra normalization with Automatic Cascade Distribution.
+- Rendering: Keep automatic cascade partitioning, fitting, and shadow transforms GPU-resident across Forward+, Mobile, and Compatibility, without synchronous depth or bounds readbacks.
+- Rendering: Exclude unshaded editor grids and gizmos from conservative shadow-receiver bounds so automatic shadows remain visible in the 3D editor.
+- Rendering: Allow live switching between Manual and Automatic cascade distribution across all rendering methods, without an editor restart.
+- Rendering: Add a viewport-local Cascade Distribution debug view in the 3D editor and RenderingServer API, showing the actual authored or GPU-fitted cascades and their boundaries without CPU readbacks.
+- Rendering: Add real-renderer cascade distribution regressions covering live switching, independent viewports, light replacement and masks, off-screen casters, transparent and custom-depth receivers, resizing, cascade counts, and debug-view restoration.
 
 ## 4.7 - 2026-06-18
 

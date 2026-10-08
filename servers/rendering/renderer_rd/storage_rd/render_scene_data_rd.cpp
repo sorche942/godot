@@ -122,6 +122,7 @@ void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RSE::ViewportDebugDraw 
 
 	ubo.flags = sdsm_enabled ? SCENE_DATA_FLAGS_USE_SDSM_SHADOWS : 0;
 	ubo.flags |= flip_y ? SCENE_DATA_FLAGS_SDSM_SHADOW_FLIP_Y : 0;
+	ubo.flags |= p_debug_mode == RSE::VIEWPORT_DEBUG_DRAW_CASCADE_DISTRIBUTION ? SCENE_DATA_FLAGS_DEBUG_CASCADE_DISTRIBUTION : 0;
 
 	ubo.flags |= p_pancake_shadows ? SCENE_DATA_FLAGS_USE_PANCAKE_SHADOWS : 0;
 

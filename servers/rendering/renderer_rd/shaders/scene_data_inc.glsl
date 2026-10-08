@@ -14,6 +14,7 @@
 #define SCENE_DATA_FLAGS_IN_SHADOW_PASS (1 << 8)
 #define SCENE_DATA_FLAGS_USE_SDSM_SHADOWS (1 << 9)
 #define SCENE_DATA_FLAGS_SDSM_SHADOW_FLIP_Y (1 << 10)
+#define SCENE_DATA_FLAGS_DEBUG_CASCADE_DISTRIBUTION (1 << 11)
 
 struct SceneData {
 	mat4 projection_matrix;

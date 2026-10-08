@@ -35,7 +35,7 @@
 #include "servers/rendering/storage/light_storage.h"
 
 bool RendererSDSM::is_enabled() {
-	return GLOBAL_GET_CACHED(int, "rendering/lights_and_shadows/directional_shadow/mode") == 1;
+	return GLOBAL_GET_CACHED(int, "rendering/lights_and_shadows/directional_shadow/cascade_distribution") == 1;
 }
 
 bool RendererSDSM::prepare_light(Light &r_light, RID p_instance, RID p_base, const Transform3D &p_light_transform, const Projection &p_camera_projection, const Transform3D &p_camera_transform, bool p_orthogonal, RendererSceneRender::RenderShadowData *p_shadows, int p_shadow_count) {

@@ -237,6 +237,9 @@ struct SceneData {
 	float luminance_multiplier;
 	uint camera_visible_layers;
 	bool pancake_shadows;
+	uvec4 debug_cascade_distribution;
+	highp vec4 debug_cascade_splits[MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS];
+	highp uvec4 debug_cascade_metadata[MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS];
 };
 
 #include "sdsm_scene_inc.glsl"
@@ -1316,6 +1319,9 @@ struct SceneData {
 	float luminance_multiplier;
 	uint camera_visible_layers;
 	bool pancake_shadows;
+	uvec4 debug_cascade_distribution;
+	highp vec4 debug_cascade_splits[MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS];
+	highp uvec4 debug_cascade_metadata[MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS];
 };
 
 #include "sdsm_scene_inc.glsl"
@@ -1348,6 +1354,9 @@ uniform highp mat4 world_transform;
 uniform highp uint instance_offset;
 uniform highp uint layer_mask;
 uniform highp uint model_flags;
+#if !defined(MODE_RENDER_DEPTH) && !defined(RENDER_MOTION_VECTORS)
+#include "cascade_distribution_inc.glsl"
+#endif
 
 #define DIRECTIONAL_LIGHT_ENABLED uint(1 << 0)
 #define DIRECTIONAL_LIGHT_BAKE_STATIC uint(1 << 1)
@@ -3330,6 +3339,13 @@ void main() {
 	frag_color.rgb += additive_light_color;
 #endif // USE_ADDITIVE_LIGHTING
 	frag_color.rgb *= scene_data_block.data.luminance_multiplier;
+	if (scene_data_block.data.debug_cascade_distribution.x != 0u) {
+#ifdef BASE_PASS
+		frag_color.rgb = linear_to_srgb(cascade_distribution_debug(-vertex.z)) * scene_data_block.data.luminance_multiplier;
+#else
+		frag_color.rgb = vec3(0.0);
+#endif
+	}
 
 #endif // !RENDER_MATERIAL
 #endif // !MODE_RENDER_DEPTH

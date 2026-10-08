@@ -847,6 +847,7 @@ void main() {
 
 /* Include our forward mobile UBOs definitions etc. */
 #include "scene_forward_mobile_inc.glsl"
+#include "../cascade_distribution_inc.glsl"
 
 /* Varyings */
 
@@ -2435,6 +2436,11 @@ void main() {
 	diffuse_buffer.rgb = mix(diffuse_buffer.rgb, fog.rgb, fog.a);
 	specular_buffer.rgb = mix(specular_buffer.rgb, vec3(0.0), fog.a);
 #endif // !FOG_DISABLED
+	if (bool(scene_data.flags & SCENE_DATA_FLAGS_DEBUG_CASCADE_DISTRIBUTION)) {
+		diffuse_buffer.rgb = cascade_distribution_debug(-vertex.z, instances.data[instance_index_interp].layer_mask, bool(instances.data[instance_index_interp].flags & INSTANCE_FLAGS_USE_LIGHTMAP));
+		diffuse_buffer.a = 0.0;
+		specular_buffer = vec4(0.0);
+	}
 
 #else //MODE_MULTIPLE_RENDER_TARGETS
 
@@ -2448,6 +2454,9 @@ void main() {
 	// Draw "fixed" fog before volumetric fog to ensure volumetric fog can appear in front of the sky.
 	out_color.rgb = mix(out_color.rgb, fog.rgb, fog.a);
 #endif // !FOG_DISABLED
+	if (bool(scene_data.flags & SCENE_DATA_FLAGS_DEBUG_CASCADE_DISTRIBUTION)) {
+		out_color.rgb = hvec3(cascade_distribution_debug(-vertex.z, instances.data[instance_index_interp].layer_mask, bool(instances.data[instance_index_interp].flags & INSTANCE_FLAGS_USE_LIGHTMAP)));
+	}
 
 	// On mobile we use a UNORM buffer with 10bpp which results in a range from 0.0 - 1.0 resulting in HDR breaking
 	// We divide by sc_luminance_multiplier to support a range from 0.0 - 2.0 both increasing precision on bright and darker images

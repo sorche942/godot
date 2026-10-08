@@ -879,6 +879,7 @@ void main() {
 /* Include half precision types. */
 #include "../half_inc.glsl"
 #include "scene_forward_clustered_inc.glsl"
+#include "../cascade_distribution_inc.glsl"
 
 /* Varyings */
 
@@ -3200,6 +3201,11 @@ void fragment_shader(in SceneData scene_data) {
 	diffuse_buffer.rgb = diffuse_buffer.rgb * fog.a + fog.rgb;
 	specular_buffer.rgb = specular_buffer.rgb * fog.a;
 #endif //!FOG_DISABLED
+	if (bool(scene_data.flags & SCENE_DATA_FLAGS_DEBUG_CASCADE_DISTRIBUTION)) {
+		diffuse_buffer.rgb = cascade_distribution_debug(-vertex.z, instances.data[instance_index].layer_mask, bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP));
+		diffuse_buffer.a = 0.0;
+		specular_buffer = vec4(0.0);
+	}
 
 #else //MODE_SEPARATE_SPECULAR
 
@@ -3215,6 +3221,9 @@ void fragment_shader(in SceneData scene_data) {
 #ifndef FOG_DISABLED
 	frag_color.rgb = frag_color.rgb * fog.a + fog.rgb;
 #endif //!FOG_DISABLED
+	if (bool(scene_data.flags & SCENE_DATA_FLAGS_DEBUG_CASCADE_DISTRIBUTION)) {
+		frag_color.rgb = cascade_distribution_debug(-vertex.z, instances.data[instance_index].layer_mask, bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP));
+	}
 
 #if defined(PREMUL_ALPHA_USED) && !defined(MODE_RENDER_DEPTH)
 	frag_color.rgb *= premul_alpha;

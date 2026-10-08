@@ -4643,6 +4643,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_DEBUG_SSAO:
 		case VIEW_DISPLAY_DEBUG_SSIL:
 		case VIEW_DISPLAY_DEBUG_PSSM_SPLITS:
+		case VIEW_DISPLAY_DEBUG_CASCADE_DISTRIBUTION:
 		case VIEW_DISPLAY_DEBUG_DECAL_ATLAS:
 		case VIEW_DISPLAY_DEBUG_AREA_LIGHT_ATLAS:
 		case VIEW_DISPLAY_DEBUG_SDFGI:
@@ -4675,6 +4676,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_DEBUG_GI_BUFFER,
 				VIEW_DISPLAY_DEBUG_DISABLE_LOD,
 				VIEW_DISPLAY_DEBUG_PSSM_SPLITS,
+				VIEW_DISPLAY_DEBUG_CASCADE_DISTRIBUTION,
 				VIEW_DISPLAY_DEBUG_DECAL_ATLAS,
 				VIEW_DISPLAY_DEBUG_AREA_LIGHT_ATLAS,
 				VIEW_DISPLAY_DEBUG_SDFGI,
@@ -4707,6 +4709,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_GI_BUFFER,
 				Viewport::DEBUG_DRAW_DISABLE_LOD,
 				Viewport::DEBUG_DRAW_PSSM_SPLITS,
+				Viewport::DEBUG_DRAW_CASCADE_DISTRIBUTION,
 				Viewport::DEBUG_DRAW_DECAL_ATLAS,
 				Viewport::DEBUG_DRAW_AREA_LIGHT_ATLAS,
 				Viewport::DEBUG_DRAW_SDFGI,
@@ -7014,6 +7017,8 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	display_submenu->set_hide_on_checkable_item_selection(false);
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Directional Shadow Splits"), VIEW_DISPLAY_DEBUG_PSSM_SPLITS, SupportedRenderingMethods::FORWARD_PLUS_MOBILE,
 			TTRC("Displays directional shadow splits in different colors to make adjusting split thresholds easier. \nRed: 1st split (closest to the camera), Green: 2nd split, Blue: 3rd split, Yellow: 4th split (furthest from the camera)"));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Cascade Distribution"), VIEW_DISPLAY_DEBUG_CASCADE_DISTRIBUTION, SupportedRenderingMethods::ALL,
+			TTRC("Displays the actual manual or GPU-fitted automatic cascades of the first shadow-enabled directional light affecting each surface. Near to far: red, green, blue, yellow. White lines mark cascade boundaries; surfaces outside shadow coverage are gray. Preserves custom shaders and transparency."));
 	display_submenu->add_separator();
 	// TRANSLATORS: "Normal" as in "normal vector", not "normal life".
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Normal Buffer"), VIEW_DISPLAY_NORMAL_BUFFER, SupportedRenderingMethods::FORWARD_PLUS);

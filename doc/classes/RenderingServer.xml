@@ -5689,6 +5689,12 @@
 			Internal buffer is drawn instead of regular scene so you can see the per-pixel output that will be used by post-processing effects.
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_CASCADE_DISTRIBUTION" value="29" enum="ViewportDebugDraw">
+			Visualizes the actual directional shadow cascade distribution on rendered surfaces. With Manual cascade distribution, uses the authored splits; with Automatic Cascade Distribution, reads the GPU-fitted splits used for shadow rendering without a CPU readback.
+			Selects the first shadow-enabled directional light in renderer order that affects the surface's light mask, skipping static lights on lightmapped surfaces. Cascades are red, green, blue, and yellow from nearest to furthest. Distinct cascade boundaries are white, approximately two screen pixels wide. Surfaces with no eligible light or beyond its shadow distance are neutral gray.
+			Preserves custom shader vertex and projection geometry, discard, depth, and transparency behavior. The mode is local to the viewport and does not change the cascade distribution setting.
+			[b]Note:[/b] Supported by Forward+, Mobile, and Compatibility. Post-processing and transparency compositing can affect the displayed colors.
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

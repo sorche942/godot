@@ -1610,6 +1610,7 @@ void RasterizerSceneGLES3::_setup_environment(const RenderDataGLES3 *p_render_da
 
 	scene_state.data.shadow_bias = p_shadow_bias;
 	scene_state.data.pancake_shadows = p_pancake_shadows;
+	scene_state.data.debug_cascade_distribution[0] = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_CASCADE_DISTRIBUTION;
 
 	//time global variables
 	scene_state.data.time = time;
@@ -1856,6 +1857,14 @@ void RasterizerSceneGLES3::_setup_lights(const RenderDataGLES3 *p_render_data, b
 					float fade_start = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_FADE_START);
 					shadow_data.fade_from = -shadow_data.shadow_split_offsets[3] * MIN(fade_start, 0.999);
 					shadow_data.fade_to = -shadow_data.shadow_split_offsets[3];
+					if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_CASCADE_DISTRIBUTION) {
+						for (int cascade = 0; cascade < 4; cascade++) {
+							scene_state.data.debug_cascade_splits[index][cascade] = shadow_data.shadow_split_offsets[cascade];
+						}
+						scene_state.data.debug_cascade_metadata[index][0] = light_data.shadow_opacity > 0.001f ? light_data.mask : 0;
+						scene_state.data.debug_cascade_metadata[index][1] = light_data.bake_mode;
+						scene_state.data.debug_cascade_metadata[index][2] = uint32_t(sdsm_light_rows[index]);
+					}
 
 					r_directional_shadow_count++;
 				}
@@ -3977,7 +3986,7 @@ void RasterizerSceneGLES3::_render_list_template(RenderListParameters *p_params,
 			}
 
 			if constexpr (p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_COLOR_TRANSPARENT) {
-				if (sdsm_active && uses_additive_lighting && pass >= int32_t(inst->light_passes.size())) {
+				if (sdsm_active && ((uses_additive_lighting && pass >= int32_t(inst->light_passes.size())) || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_CASCADE_DISTRIBUTION)) {
 					spec_constants |= SceneShaderGLES3::USE_SDSM;
 				}
 			}
