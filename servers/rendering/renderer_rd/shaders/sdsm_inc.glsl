@@ -13,7 +13,7 @@ vec4 sdsm_splits(vec2 depth_range, vec2 extra_range, float camera_near, float sh
 		sample_max = max(sample_max, min(extra_range.y, shadow_far));
 	}
 	if (sample_min > sample_max) {
-		// An empty distribution keeps the original CSM cameras and metadata.
+		// Each backend supplies its conservative current-camera fallback.
 		return vec4(0.0);
 	}
 	float minimum_range = max(0.001, abs(sample_min) * 0.0001);

@@ -32,6 +32,7 @@
 
 #include "core/templates/paged_allocator.h"
 #include "servers/rendering/multi_uma_buffer.h"
+#include "servers/rendering/renderer_rd/effects/sdsm_shadow_packets.h"
 #include "servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 
@@ -140,6 +141,9 @@ private:
 		uint32_t element_offset = 0;
 		uint32_t subpass = 0;
 		bool use_material_feedback = false;
+		const LocalVector<uint32_t> *sdsm_instances = nullptr;
+		RID sdsm_commands;
+		uint32_t sdsm_cascade = UINT32_MAX;
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, RID p_render_pass_uniform_set, SceneShaderForwardMobile::ShaderSpecialization p_base_specialization, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -162,15 +166,15 @@ private:
 
 	/* Render shadows */
 
-	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D());
+	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D(), bool p_sdsm = false);
 	void _render_shadow_begin();
-	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D());
+	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D(), RID p_sdsm_light = RID(), uint32_t p_sdsm_cascade = UINT32_MAX);
 	void _render_shadow_process();
 	void _render_shadow_end();
 
 	/* Render Scene */
 
-	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, bool p_use_directional_shadow_atlas = false, uint32_t p_pass_offset = 0u);
+	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, bool p_use_directional_shadow_atlas = false, uint32_t p_pass_offset = 0u, RID p_sdsm_visibility = RID(), RID p_sdsm_result = RID());
 	void _pre_opaque_render(RenderDataRD *p_render_data);
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
@@ -213,6 +217,8 @@ private:
 			uint32_t base_index;
 			uint32_t multimesh_motion_vectors_current_offset;
 			uint32_t multimesh_motion_vectors_previous_offset;
+			uint32_t sdsm_packet = UINT32_MAX;
+			uint32_t sdsm_cascade = UINT32_MAX;
 			PushConstantUbershader ubershader;
 		};
 
@@ -319,6 +325,8 @@ private:
 			RID framebuffer;
 			Rect2i rect;
 			bool clear_depth;
+			RID sdsm_light;
+			uint32_t sdsm_cascade = UINT32_MAX;
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
@@ -422,6 +430,26 @@ private:
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_clear_colors = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
 	RenderList render_list[RENDER_LIST_MAX];
+	struct SDSMPreparedLight {
+		RendererRD::SDSMShadowPackets::Prepared gpu;
+		uint32_t element_from = 0;
+		uint32_t element_count = 0;
+		LocalVector<GeometryInstanceSurfaceDataCache *> elements;
+		LocalVector<RenderElementInfo> element_info;
+		LocalVector<uint32_t> instances;
+		LocalVector<RendererRD::SDSMShadowPackets::Surface> surfaces;
+		LocalVector<RendererRD::SDSMShadowPackets::Packet> packets;
+		LocalVector<RendererRD::SDSMShadowPackets::LOD> lods;
+		LocalVector<RID> nested_commands;
+	};
+	RendererRD::SDSMShadowPackets *sdsm_packets = nullptr;
+	RID sdsm_default_visibility;
+	RID sdsm_default_result;
+	RID sdsm_default_directional;
+	HashMap<RID, SDSMPreparedLight> sdsm_prepared_lights;
+	LocalVector<SDSMPreparedLight> sdsm_prepared_pool;
+	float sdsm_lod_pixel_scale = 1.0f;
+	void _prepare_sdsm_packets(RID p_light, const PagedArray<RenderGeometryInstance *> &p_instances, SDSMPreparedLight &r_prepared, float p_lod_threshold);
 
 protected:
 	/* setup */
@@ -543,6 +571,8 @@ protected:
 		bool use_soft_shadow = false;
 		bool store_transform_cache = true; // If true we copy our transform into our per-draw buffer, if false we use our transforms UBO and clear our per-draw transform.
 		uint32_t instance_count = 0;
+		// Scratch candidate ordering, consumed synchronously during per-light packet preparation.
+		uint32_t sdsm_caster_index = 0;
 		uint32_t trail_steps = 1;
 
 		uint64_t prev_transform_change_frame = UINT_MAX;

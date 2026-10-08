@@ -120,20 +120,17 @@ void light_compute(hvec3 N, hvec3 L, hvec3 V, half A, hvec3 light_color, bool is
 		inout hvec3 diffuse_light, inout hvec3 specular_light) {
 #if defined(LIGHT_CODE_USED)
 	// Light is written by the user shader.
-	mat4 inv_view_matrix = transpose(mat4(scene_data_block.data.inv_view_matrix[0],
-			scene_data_block.data.inv_view_matrix[1],
-			scene_data_block.data.inv_view_matrix[2],
+	SceneData fitted_scene = sdsm_scene_data(scene_data_block.data);
+	mat4 inv_view_matrix = transpose(mat4(fitted_scene.inv_view_matrix[0],
+			fitted_scene.inv_view_matrix[1],
+			fitted_scene.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
-	mat4 read_view_matrix = transpose(mat4(scene_data_block.data.view_matrix[0],
-			scene_data_block.data.view_matrix[1],
-			scene_data_block.data.view_matrix[2],
+	mat4 read_view_matrix = transpose(mat4(fitted_scene.view_matrix[0],
+			fitted_scene.view_matrix[1],
+			fitted_scene.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
-#ifdef USING_MOBILE_RENDERER
-	uint instance_index = draw_call.instance_index;
-#else
 	uint instance_index = instance_index_interp;
-#endif
 
 	mat4 read_model_matrix = transpose(mat4(instances.data[instance_index].transform[0],
 			instances.data[instance_index].transform[1],
@@ -141,9 +138,9 @@ void light_compute(hvec3 N, hvec3 L, hvec3 V, half A, hvec3 light_color, bool is
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
 #undef projection_matrix
-#define projection_matrix scene_data_block.data.projection_matrix
+#define projection_matrix sdsm_scene_data(scene_data_block.data).projection_matrix
 #undef inv_projection_matrix
-#define inv_projection_matrix scene_data_block.data.inv_projection_matrix
+#define inv_projection_matrix sdsm_scene_data(scene_data_block.data).inv_projection_matrix
 
 	vec2 read_viewport_size = scene_data_block.data.viewport_size;
 
@@ -1159,20 +1156,17 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 #if defined(LIGHT_CODE_USED) && defined(AREA_LIGHT_CODE_USED)
 	// Light is written by the user shader.
-	mat4 inv_view_matrix = transpose(mat4(scene_data_block.data.inv_view_matrix[0],
-			scene_data_block.data.inv_view_matrix[1],
-			scene_data_block.data.inv_view_matrix[2],
+	SceneData fitted_scene = sdsm_scene_data(scene_data_block.data);
+	mat4 inv_view_matrix = transpose(mat4(fitted_scene.inv_view_matrix[0],
+			fitted_scene.inv_view_matrix[1],
+			fitted_scene.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
-	mat4 read_view_matrix = transpose(mat4(scene_data_block.data.view_matrix[0],
-			scene_data_block.data.view_matrix[1],
-			scene_data_block.data.view_matrix[2],
+	mat4 read_view_matrix = transpose(mat4(fitted_scene.view_matrix[0],
+			fitted_scene.view_matrix[1],
+			fitted_scene.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
-#ifdef USING_MOBILE_RENDERER
-	uint instance_index = draw_call.instance_index;
-#else
 	uint instance_index = instance_index_interp;
-#endif
 
 	mat4 read_model_matrix = transpose(mat4(instances.data[instance_index].transform[0],
 			instances.data[instance_index].transform[1],
@@ -1180,9 +1174,9 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
 #undef projection_matrix
-#define projection_matrix scene_data_block.data.projection_matrix
+#define projection_matrix sdsm_scene_data(scene_data_block.data).projection_matrix
 #undef inv_projection_matrix
-#define inv_projection_matrix scene_data_block.data.inv_projection_matrix
+#define inv_projection_matrix sdsm_scene_data(scene_data_block.data).inv_projection_matrix
 
 	vec2 read_viewport_size = scene_data_block.data.viewport_size;
 

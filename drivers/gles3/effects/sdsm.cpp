@@ -34,6 +34,8 @@
 #include "drivers/gles3/storage/config.h"
 #include "drivers/gles3/storage/light_storage.h"
 #include "drivers/gles3/storage/texture_storage.h"
+#include "drivers/gles3/storage/utilities.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 #include <cfloat>
 
@@ -60,7 +62,17 @@ void SDSM::_free_buffers() {
 		glDeleteFramebuffers(1, &level.framebuffer);
 	}
 	levels.clear();
-	Level *targets[] = { &depth_ranges, &splits, &bounds, &fitted_bounds, &cameras };
+	for (const Level &level : paired_levels) {
+		glDeleteTextures(1, &level.texture);
+		glDeleteFramebuffers(1, &level.framebuffer);
+	}
+	paired_levels.clear();
+	for (const Level &level : caster_levels) {
+		glDeleteTextures(1, &level.texture);
+		glDeleteFramebuffers(1, &level.framebuffer);
+	}
+	caster_levels.clear();
+	Level *targets[] = { &depth_ranges, &splits, &bounds, &fitted_bounds, &final_bounds, &cameras, &tile_summary[0], &tile_summary[1], &tile_summary[2] };
 	for (Level *target : targets) {
 		glDeleteTextures(1, &target->texture);
 		glDeleteFramebuffers(1, &target->framebuffer);
@@ -87,6 +99,7 @@ SDSM::~SDSM() {
 
 bool SDSM::_unsupported() {
 	unsupported = true;
+	light_count = 0;
 	_free_buffers();
 	glBindFramebuffer(GL_FRAMEBUFFER, TextureStorage::system_fbo);
 	WARN_PRINT("Compatibility SDSM requires renderable RGBA32F and sampleable depth framebuffers. This device does not support those framebuffer operations; using regular CSM.");
@@ -156,12 +169,39 @@ bool SDSM::prepare(const Size2i &p_size, uint32_t p_views, const Rect2i &p_regio
 		if (!supported) {
 			return _unsupported();
 		}
+		Level paired;
+		supported = _create_target(paired, next_size);
+		paired_levels.push_back(paired);
+		if (!supported) {
+			return _unsupported();
+		}
+		glBindFramebuffer(GL_FRAMEBUFFER, level.framebuffer);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, paired.texture, 0);
+		const GLenum receiver_buffers[] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+		glDrawBuffers(2, receiver_buffers);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+			return _unsupported();
+		}
 	} while (next_size != Size2i(1, 1));
+	for (int i = 0; i < 3; i++) {
+		if (!_create_target(tile_summary[i], levels[0].size)) {
+			return _unsupported();
+		}
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, tile_summary[0].framebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, tile_summary[1].texture, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, tile_summary[2].texture, 0);
+	const GLenum summary_buffers[] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+	glDrawBuffers(3, summary_buffers);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		return _unsupported();
+	}
 	if (!_create_target(depth_ranges, Size2i(RendererSceneRender::MAX_RENDER_VIEWS, 1)) ||
 			!_create_target(splits, Size2i(1, 1)) ||
 			!_create_target(bounds, Size2i(RendererSceneRender::MAX_RENDER_VIEWS * 2, 4)) ||
 			!_create_target(fitted_bounds, Size2i(2, 4)) ||
-			!_create_target(cameras, Size2i(16, RendererSceneRender::MAX_DIRECTIONAL_LIGHTS * 4))) {
+			!_create_target(final_bounds, Size2i(2, 4)) ||
+			!_create_target(cameras, Size2i(24, RendererSceneRender::MAX_DIRECTIONAL_LIGHTS * 4))) {
 		return _unsupported();
 	}
 	glGenTextures(1, &records_texture);
@@ -183,8 +223,10 @@ void SDSM::_bind_source(GLuint p_texture, int p_unit) {
 	glBindTexture(GL_TEXTURE_2D, p_texture);
 }
 
-void SDSM::_draw(const Level &p_target, const Rect2i &p_rect) {
+void SDSM::_draw(const Level &p_target, const Rect2i &p_rect, int p_color_count) {
 	glBindFramebuffer(GL_FRAMEBUFFER, p_target.framebuffer);
+	const GLenum draw_buffers[] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+	glDrawBuffers(p_color_count, draw_buffers);
 	glViewport(p_rect.position.x, p_rect.position.y, p_rect.size.x, p_rect.size.y);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 }
@@ -205,13 +247,22 @@ void SDSM::_reduce(GLuint p_depth, const Projection &p_inverse_projection, const
 	shader.version_set_uniform(SdsmShaderGLES3::OPERATION, p_operation, shader_version, SdsmShaderGLES3::MODE_SAMPLE);
 	shader.version_set_uniform(SdsmShaderGLES3::CASCADE_INDEX, p_cascade, shader_version, SdsmShaderGLES3::MODE_SAMPLE);
 	_bind_source(splits.texture, 1);
+	if (p_operation != 0) {
+		_bind_source(tile_summary[0].texture, 3);
+		_bind_source(tile_summary[1].texture, 4);
+		_bind_source(tile_summary[2].texture, 5);
+	}
 	GLuint source = p_depth;
 	for (int i = 0; i < levels.size(); i++) {
 		if (i == 1) {
 			shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_REDUCE);
+			shader.version_set_uniform(SdsmShaderGLES3::OPERATION, p_operation, shader_version, SdsmShaderGLES3::MODE_REDUCE);
 		}
 		_bind_source(source, 0);
-		_draw(levels[i], Rect2i(Point2i(), levels[i].size));
+		if (i > 0 && p_operation != 0) {
+			_bind_source(paired_levels[i - 1].texture, 3);
+		}
+		_draw(levels[i], Rect2i(Point2i(), levels[i].size), p_operation == 0 ? 1 : 2);
 		source = levels[i].texture;
 	}
 }
@@ -223,16 +274,18 @@ void SDSM::_copy_result(const Level &p_target, int p_x, int p_y) {
 }
 
 void SDSM::reduce_depth(const Vector<Projection> &p_inverse_projection, const Vector<Transform3D> &p_view_to_camera) {
+	RENDER_TIMESTAMP("SDSM Depth Reduction");
 	for (int view = 0; view < depth_textures.size(); view++) {
 		_reduce(depth_textures[view], p_inverse_projection[view], p_view_to_camera[view], Transform3D(), 0, 0);
 		_copy_result(depth_ranges, view, 0);
 	}
+	RENDER_TIMESTAMP("SDSM Depth Ready");
 	glBindVertexArray(0);
 	glBindFramebuffer(GL_FRAMEBUFFER, TextureStorage::system_fbo);
 }
 
 bool SDSM::fit_light(const Vector<Projection> &p_inverse_projection, const Vector<Transform3D> &p_view_to_camera, const RendererSDSM::Light &p_light, const Vector<AABB> &p_receivers, const LocalVector<RendererSDSM::Caster> &p_casters) {
-	if (light_count >= RendererSceneRender::MAX_DIRECTIONAL_LIGHTS) {
+	if (unsupported || light_count >= RendererSceneRender::MAX_DIRECTIONAL_LIGHTS) {
 		return false;
 	}
 	const int record_width = 256;
@@ -240,6 +293,27 @@ bool SDSM::fit_light(const Vector<Projection> &p_inverse_projection, const Vecto
 	if (needed_height > Config::get_singleton()->max_texture_size) {
 		ERR_PRINT_ONCE("Compatibility SDSM receiver/caster bounds exceed the device texture capacity; using CSM for this light.");
 		return false;
+	}
+	const int caster_groups = MIN(MAX(int((p_casters.size() + 63) / 64), 1), Config::get_singleton()->max_texture_size);
+	if (caster_levels.is_empty() || caster_levels[0].size.x < caster_groups) {
+		for (const Level &level : caster_levels) {
+			glDeleteTextures(1, &level.texture);
+			glDeleteFramebuffers(1, &level.framebuffer);
+		}
+		caster_levels.clear();
+		int width = MIN(int(Math::next_power_of_2(uint32_t(caster_groups))), Config::get_singleton()->max_texture_size);
+		do {
+			Level level;
+			bool supported = _create_target(level, Size2i(width, 4));
+			caster_levels.push_back(level);
+			if (!supported) {
+				return _unsupported();
+			}
+			if (width == 1) {
+				break;
+			}
+			width = (width + 3) / 4;
+		} while (true);
 	}
 	if (needed_height > records_height) {
 		records_height = MIN(int(Math::next_power_of_2(uint32_t(needed_height))), Config::get_singleton()->max_texture_size);
@@ -292,6 +366,7 @@ bool SDSM::fit_light(const Vector<Projection> &p_inverse_projection, const Vecto
 			extra.y = MAX(extra.y, MIN(far, p_light.shadow_far));
 		}
 	}
+	float caster_max_z = -FLT_MAX;
 	for (uint32_t caster = 0; caster < p_casters.size(); caster++) {
 		const Vector3 low = p_casters[caster].bounds.position;
 		const Vector3 high = p_casters[caster].bounds.get_end();
@@ -304,6 +379,7 @@ bool SDSM::fit_light(const Vector<Projection> &p_inverse_projection, const Vecto
 		data[offset + 5] = high.y;
 		data[offset + 6] = high.z;
 		data[offset + 7] = 0.0f;
+		caster_max_z = MAX(caster_max_z, float(high.z));
 	}
 	_bind_source(records_texture, 2);
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, record_width, needed_height, GL_RGBA, GL_FLOAT, data);
@@ -322,30 +398,67 @@ bool SDSM::fit_light(const Vector<Projection> &p_inverse_projection, const Vecto
 		shader.version_set_uniform(SdsmShaderGLES3::RECEIVER_COUNT, int(p_receivers.size()), shader_version, variant);
 		shader.version_set_uniform(SdsmShaderGLES3::CASTER_COUNT, int(p_casters.size()), shader_version, variant);
 	}
+	shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_FIT);
+	shader.version_set_uniform(SdsmShaderGLES3::CASTER_MAX_Z, caster_max_z, shader_version, SdsmShaderGLES3::MODE_FIT);
+	RENDER_TIMESTAMP("SDSM Splits");
 	shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_SPLITS);
 	shader.version_set_uniform(SdsmShaderGLES3::EXTRA_RANGE, extra, shader_version, SdsmShaderGLES3::MODE_SPLITS);
 	_bind_source(depth_ranges.texture, 0);
 	_draw(splits, Rect2i(Point2i(), splits.size));
-	for (uint32_t cascade = 0; cascade < p_light.cascade_count; cascade++) {
-		for (int view = 0; view < depth_textures.size(); view++) {
-			for (int operation = 1; operation <= 2; operation++) {
-				_reduce(depth_textures[view], p_inverse_projection[view], p_view_to_camera[view], camera_to_light, operation, cascade);
-				_copy_result(bounds, view * 2 + operation - 1, cascade);
-			}
+	for (int view = 0; view < depth_textures.size(); view++) {
+		RENDER_TIMESTAMP("SDSM Tile Summaries");
+		// One exact reconstruction per pixel/light. Fully contained tiles reuse
+		// their extrema; only partition boundary tiles reconstruct their pixels.
+		shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_SUMMARY);
+		shader.version_set_uniform(SdsmShaderGLES3::INVERSE_PROJECTION, p_inverse_projection[view], shader_version, SdsmShaderGLES3::MODE_SUMMARY);
+		shader.version_set_uniform(SdsmShaderGLES3::VIEW_TO_CAMERA, p_view_to_camera[view], shader_version, SdsmShaderGLES3::MODE_SUMMARY);
+		shader.version_set_uniform(SdsmShaderGLES3::CAMERA_TO_LIGHT, camera_to_light, shader_version, SdsmShaderGLES3::MODE_SUMMARY);
+		shader.version_set_uniform(SdsmShaderGLES3::REGION, Vector4(region.position.x, region.position.y, region.get_end().x, region.get_end().y), shader_version, SdsmShaderGLES3::MODE_SUMMARY);
+		_bind_source(depth_textures[view], 0);
+		_draw(tile_summary[0], Rect2i(Point2i(), tile_summary[0].size), 3);
+		RENDER_TIMESTAMP("SDSM Receiver Reduction");
+		for (uint32_t cascade = 0; cascade < p_light.cascade_count; cascade++) {
+			_reduce(depth_textures[view], p_inverse_projection[view], p_view_to_camera[view], camera_to_light, 1, cascade);
+			_copy_result(bounds, view * 2, cascade);
+			glReadBuffer(GL_COLOR_ATTACHMENT1);
+			_copy_result(bounds, view * 2 + 1, cascade);
+			glReadBuffer(GL_COLOR_ATTACHMENT0);
 		}
 	}
+	RENDER_TIMESTAMP("SDSM Receiver Fit");
 	shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_FIT);
 	_bind_source(bounds.texture, 0);
 	_bind_source(splits.texture, 1);
 	_bind_source(records_texture, 2);
 	_draw(fitted_bounds, Rect2i(Point2i(), fitted_bounds.size));
+	RENDER_TIMESTAMP("SDSM Caster Fit");
+	shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_CASTERS);
+	shader.version_set_uniform(SdsmShaderGLES3::CASTER_GROUP_SIZE, MAX(int((p_casters.size() + caster_levels[0].size.x - 1) / caster_levels[0].size.x), 1), shader_version, SdsmShaderGLES3::MODE_CASTERS);
+	_bind_source(fitted_bounds.texture, 0);
+	_draw(caster_levels[0], Rect2i(Point2i(), caster_levels[0].size));
+	shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_CASTER_REDUCE);
+	for (int i = 1; i < caster_levels.size(); i++) {
+		_bind_source(caster_levels[i - 1].texture, 0);
+		_draw(caster_levels[i], Rect2i(Point2i(), caster_levels[i].size));
+	}
+	shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_FINALIZE);
+	_bind_source(fitted_bounds.texture, 0);
+	_bind_source(caster_levels[caster_levels.size() - 1].texture, 3);
+	_draw(final_bounds, Rect2i(Point2i(), final_bounds.size));
+	RENDER_TIMESTAMP("SDSM Shadow Cameras");
 	shader.version_bind_shader(shader_version, SdsmShaderGLES3::MODE_CAMERA);
 	Transform3D relative_light = p_light.light_to_world;
 	relative_light.origin = Vector3();
 	shader.version_set_uniform(SdsmShaderGLES3::LIGHT_TO_WORLD, relative_light, shader_version, SdsmShaderGLES3::MODE_CAMERA);
+	// Lighting vertices are in main-camera space. Keep the translation
+	// relative, just as the existing per-vertex reconstruction did.
+	Transform3D camera_to_relative_world = p_light.camera_transform;
+	camera_to_relative_world.origin = Vector3();
+	shader.version_set_uniform(SdsmShaderGLES3::VIEW_TO_CAMERA, camera_to_relative_world, shader_version, SdsmShaderGLES3::MODE_CAMERA);
 	shader.version_set_uniform(SdsmShaderGLES3::ROW_OFFSET, light_count * 4, shader_version, SdsmShaderGLES3::MODE_CAMERA);
-	_bind_source(fitted_bounds.texture, 0);
-	_draw(cameras, Rect2i(0, light_count * 4, 16, 4));
+	_bind_source(final_bounds.texture, 0);
+	_draw(cameras, Rect2i(0, light_count * 4, 24, 4));
+	RENDER_TIMESTAMP("SDSM Fit Complete");
 	lights[light_count++] = p_light.instance;
 	glBindVertexArray(0);
 	glBindFramebuffer(GL_FRAMEBUFFER, TextureStorage::system_fbo);

@@ -52,7 +52,7 @@ bool RendererSDSM::prepare_light(Light &r_light, RID p_instance, RID p_base, con
 	r_light.blend_splits = RSG::light_storage->light_directional_get_blend_splits(p_base);
 
 	for (int i = 0; i < p_shadow_count; i++) {
-		if (p_shadows[i].light == p_instance && p_shadows[i].pass >= 0 && p_shadows[i].pass < 4) {
+		if (p_shadows[i].sdsm && p_shadows[i].light == p_instance && p_shadows[i].pass >= 0 && p_shadows[i].pass < 4) {
 			r_light.shadow_indices[p_shadows[i].pass] = i;
 			r_light.cascade_count = MAX(r_light.cascade_count, uint32_t(p_shadows[i].pass + 1));
 		}
@@ -80,29 +80,68 @@ bool RendererSDSM::prepare_light(Light &r_light, RID p_instance, RID p_base, con
 	return true;
 }
 
-const LocalVector<RendererSDSM::Caster> &RendererSDSM::collect_casters(const Light &p_light, RendererSceneRender::RenderShadowData *p_shadows) {
-	caster_set.clear();
-	casters.clear();
-	const Transform3D world_to_light = p_light.light_to_world.affine_inverse();
-	// Dynamic partition boundaries may cross every original CSM split. A new
-	// cascade must consider the union, not merely its old per-split caster list.
-	for (uint32_t i = 0; i < p_light.cascade_count; i++) {
-		const PagedArray<RenderGeometryInstance *> &instances = p_shadows[p_light.shadow_indices[i]].instances;
-		for (uint64_t j = 0; j < instances.size(); j++) {
-			RenderGeometryInstance *instance = instances[j];
-			if (!caster_set.has(instance)) {
-				caster_set.insert(instance);
-				casters.push_back({ instance, (world_to_light * instance->get_transform()).xform(instance->get_aabb()) });
-			}
+Vector<Plane> RendererSDSM::candidate_planes(const Projection &p_camera_projection, const Transform3D &p_camera_transform, const Basis &p_light_basis, real_t p_shadow_far, real_t p_texture_size, real_t p_normal_bias, real_t p_soft_angle, real_t p_blur) {
+	Vector3 endpoints[8];
+	ERR_FAIL_COND_V(!p_camera_projection.get_endpoints(Transform3D(), endpoints), Vector<Plane>());
+	const real_t near_distance = p_camera_projection.get_z_near();
+	const real_t far_distance = p_camera_projection.get_z_far();
+	const real_t fraction = CLAMP((p_shadow_far - near_distance) / (far_distance - near_distance), real_t(0), real_t(1));
+	Vector3 center;
+	for (int i = 0; i < 4; i++) {
+		endpoints[i] = endpoints[i + 4].lerp(endpoints[i], fraction);
+	}
+	// Work relative to the camera origin before projecting onto the light axes.
+	// This also preserves asymmetric and canted projections without rebuilding FOV.
+	for (Vector3 &endpoint : endpoints) {
+		endpoint = p_camera_transform.basis.xform(endpoint);
+		center += endpoint;
+	}
+	center /= 8;
+	real_t radius = 0;
+	Vector3 minimum;
+	Vector3 maximum;
+	for (int i = 0; i < 8; i++) {
+		radius = MAX(radius, center.distance_to(endpoints[i]));
+		Vector3 point = p_light_basis.xform_inv(endpoints[i]);
+		if (i == 0) {
+			minimum = maximum = point;
+		} else {
+			minimum = minimum.min(point);
+			maximum = maximum.max(point);
 		}
 	}
+	// Cover filter taps, stabilization and normal offset using the largest
+	// possible full-distance texel, rather than the old split texel sizes.
+	const real_t texel = radius * 2 / MAX(p_texture_size - 2, real_t(1));
+	// Eight texels covers the largest directional filter quality radius.
+	const real_t padding = texel * (4 + 64 * MAX(p_blur, real_t(0)) + Math::abs(p_normal_bias));
+	minimum -= Vector3(padding, padding, padding);
+	maximum += Vector3(padding, padding, padding);
+	Vector<Plane> planes;
+	// DynamicBVH does not expose root bounds. Angular PCSS expansion depends
+	// on the furthest upstream caster, not just receiver depth, so no finite
+	// receiver-only XY box can conservatively reject soft-shadow candidates.
+	const bool angular_soft_shadows = p_soft_angle > 0 && p_blur > 0;
+	planes.resize(angular_soft_shadows ? 1 : 5);
+	for (int axis = 0; axis < (angular_soft_shadows ? 0 : 2); axis++) {
+		const Vector3 normal = p_light_basis.get_column(axis);
+		const real_t origin = normal.dot(p_camera_transform.origin);
+		planes.write[axis * 2] = Plane(normal, maximum[axis] + origin);
+		planes.write[axis * 2 + 1] = Plane(-normal, -minimum[axis] - origin);
+	}
+	const Vector3 z = p_light_basis.get_column(2);
+	planes.write[planes.size() - 1] = Plane(-z, -minimum.z - z.dot(p_camera_transform.origin));
+	// No upstream plane: off-screen occluders can cast onto receivers from any
+	// distance along the directional light, including beyond the camera far plane.
+	return planes;
+}
 
-	for (uint32_t i = 0; i < p_light.cascade_count; i++) {
-		PagedArray<RenderGeometryInstance *> &instances = p_shadows[p_light.shadow_indices[i]].instances;
-		instances.clear();
-		for (const Caster &caster : casters) {
-			instances.push_back(caster.instance);
-		}
+const LocalVector<RendererSDSM::Caster> &RendererSDSM::prepare_casters(const Light &p_light, const PagedArray<RenderGeometryInstance *> &p_candidates, bool p_light_space_bounds) {
+	casters.clear();
+	const Transform3D world_to_light = p_light_space_bounds ? p_light.light_to_world.affine_inverse() : Transform3D();
+	for (uint64_t i = 0; i < p_candidates.size(); i++) {
+		RenderGeometryInstance *instance = p_candidates[i];
+		casters.push_back({ instance, p_light_space_bounds ? (world_to_light * instance->get_transform()).xform(instance->get_aabb()) : AABB() });
 	}
 	return casters;
 }

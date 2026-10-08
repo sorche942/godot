@@ -244,14 +244,12 @@ struct SceneData {
 // The containing data block is for historic reasons.
 layout(std140) uniform SceneDataBlock { // ubo:2
 	SceneData data;
-}
-scene_data_block;
+} scene_data_block;
 
 #ifdef RENDER_MOTION_VECTORS
 layout(std140) uniform PrevSceneDataBlock { // ubo:13
 	SceneData data;
-}
-prev_scene_data_block;
+} prev_scene_data_block;
 #endif
 
 #ifndef RENDER_MOTION_VECTORS
@@ -498,8 +496,7 @@ struct MultiviewData {
 
 layout(std140) uniform MultiviewDataBlock { // ubo:9
 	MultiviewData data;
-}
-multiview_data_block;
+} multiview_data_block;
 
 #ifdef EMULATE_MULTIVIEW
 #define ViewIndex (multiview_data_block.data.view_index)
@@ -508,8 +505,7 @@ multiview_data_block;
 #ifdef RENDER_MOTION_VECTORS
 layout(std140) uniform PrevMultiviewDataBlock { // ubo:14
 	MultiviewData data;
-}
-prev_multiview_data_block;
+} prev_multiview_data_block;
 #endif // RENDER_MOTION_VECTORS
 
 #endif // USE_MULTIVIEW
@@ -831,8 +827,6 @@ void vertex_shader(vec4 vertex_angle_attrib_input,
 	if (sdsm_light_row >= 0 && texelFetch(sdsm_camera_texture, ivec2(0, sdsm_light_row), 0).w > 0.0) {
 		shadow_data.shadow_split_offsets = texelFetch(sdsm_camera_texture, ivec2(2, sdsm_light_row), 0);
 		mat4 matrices[4];
-		mat4 camera_to_relative_world = scene_data_input.inv_view_matrix;
-		camera_to_relative_world[3].xyz = vec3(0.0);
 		for (int cascade = 0; cascade < 4; cascade++) {
 			int row = sdsm_light_row + cascade;
 			int active_cascade = cascade;
@@ -846,8 +840,9 @@ void vertex_shader(vec4 vertex_angle_attrib_input,
 			row = sdsm_light_row + active_cascade;
 			shadow_data.shadow_normal_bias[cascade] = texelFetch(sdsm_camera_texture, ivec2(3, row), 0).x;
 			vec4 rect = sdsm_atlas_rects[active_cascade];
+			mat4 clip_matrix = sdsm_camera_matrix(20, row);
 			mat4 atlas_bias = mat4(vec4(rect.z * 0.5, 0.0, 0.0, 0.0), vec4(0.0, rect.w * 0.5, 0.0, 0.0), vec4(0.0, 0.0, 0.5, 0.0), vec4(rect.xy + rect.zw * 0.5, 0.5, 1.0));
-			matrices[cascade] = atlas_bias * sdsm_camera_matrix(4, row) * sdsm_camera_matrix(8, row) * camera_to_relative_world;
+			matrices[cascade] = atlas_bias * clip_matrix;
 		}
 		shadow_data.shadow_matrix1 = matrices[0];
 		shadow_data.shadow_matrix2 = matrices[1];
@@ -1249,8 +1244,7 @@ struct DecalData {
 
 layout(std140) uniform DecalDataBlock { // ubo:15
 	DecalData data[MAX_DECALS];
-}
-decal_data_block;
+} decal_data_block;
 
 #endif // USE_DECALS
 
@@ -1328,8 +1322,7 @@ struct SceneData {
 
 layout(std140) uniform SceneDataBlock { // ubo:2
 	SceneData data;
-}
-scene_data_block;
+} scene_data_block;
 
 #ifdef USE_MULTIVIEW
 struct MultiviewData {
@@ -1344,8 +1337,7 @@ struct MultiviewData {
 
 layout(std140) uniform MultiviewDataBlock { // ubo:9
 	MultiviewData data;
-}
-multiview_data_block;
+} multiview_data_block;
 
 #ifdef EMULATE_MULTIVIEW
 #define ViewIndex (multiview_data_block.data.view_index)

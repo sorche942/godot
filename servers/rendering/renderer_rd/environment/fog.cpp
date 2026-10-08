@@ -34,6 +34,7 @@
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server_default.h"
 
 using namespace RendererRD;
@@ -329,6 +330,10 @@ ALBEDO = vec3(1.0);
 			volumetric_fog.process_pipelines[i].create_compute_pipeline(volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(i)));
 		}
 		volumetric_fog.params_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(VolumetricFogShader::ParamsUBO));
+		Vector<uint8_t> default_sdsm_data;
+		default_sdsm_data.resize(p_max_directional_lights * 1664);
+		memset(default_sdsm_data.ptrw(), 0, default_sdsm_data.size());
+		volumetric_fog.default_sdsm_directional_buffer = RD::get_singleton()->uniform_buffer_create(default_sdsm_data.size(), default_sdsm_data);
 	}
 }
 
@@ -345,6 +350,9 @@ void Fog::free_fog_shader() {
 	}
 	if (volumetric_fog.params_ubo.is_valid()) {
 		RD::get_singleton()->free_rid(volumetric_fog.params_ubo);
+	}
+	if (volumetric_fog.default_sdsm_directional_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(volumetric_fog.default_sdsm_directional_buffer);
 	}
 	if (volumetric_fog.default_shader.is_valid()) {
 		material_storage->shader_free(volumetric_fog.default_shader);
@@ -1176,6 +1184,13 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, volumetric_fog.process_pipelines[using_sdfgi ? VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_SDFGI : VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY].get_rid());
 
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, fog->gi_dependent_sets.process_uniform_set_density, 0);
+	RD::Uniform sdsm_uniform;
+	sdsm_uniform.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+	sdsm_uniform.binding = 0;
+	sdsm_uniform.append_id(p_settings.sdsm_directional_light_buffer.is_valid() ? p_settings.sdsm_directional_light_buffer : volumetric_fog.default_sdsm_directional_buffer);
+	const int density_variant = using_sdfgi ? VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_SDFGI : VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY;
+	RID sdsm_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(density_variant)), 2, sdsm_uniform);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, sdsm_uniform_set, 2);
 
 	if (using_sdfgi) {
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, fog->sdfgi_uniform_set, 1);

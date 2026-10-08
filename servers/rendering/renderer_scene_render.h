@@ -283,6 +283,7 @@ public:
 	struct RenderShadowData {
 		RID light;
 		int pass = 0;
+		bool sdsm = false;
 		PagedArray<RenderGeometryInstance *> instances;
 	};
 

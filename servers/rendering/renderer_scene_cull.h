@@ -1104,6 +1104,9 @@ public:
 
 			} cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; //max 4 cascades
 			uint32_t cascade_count;
+			uint32_t candidate_count;
+			bool sdsm = false;
+			Frustum candidate_frustum;
 
 		} shadows[RendererSceneRender::MAX_DIRECTIONAL_LIGHTS];
 

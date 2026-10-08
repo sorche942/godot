@@ -360,7 +360,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			continue;
 		}
 
-		push_constant.base_index = i + p_params->element_offset;
+		push_constant.base_index = p_params->sdsm_base_indices ? p_params->sdsm_base_indices[i] : i + p_params->element_offset;
+		push_constant.sdsm_cascade = p_params->sdsm_cascade;
+		push_constant.sdsm_packet = p_params->sdsm_base_indices && !p_params->sdsm_nested[i] ? i : UINT32_MAX;
 
 		RID material_uniform_set;
 		void *mesh_surface;
@@ -612,7 +614,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 			bool indirect = bool(surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT);
 
-			if (emulate_point_size) {
+			if (p_params->sdsm_commands.is_valid()) {
+				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), p_params->sdsm_commands, (p_params->sdsm_cascade * p_params->sdsm_packet_count + i) * 5 * sizeof(uint32_t), 1, 0);
+			} else if (emulate_point_size) {
 				if (indirect) {
 					WARN_PRINT("Indirect draws are not supported when emulating point size.");
 				}
@@ -1342,7 +1346,7 @@ void RenderForwardClustered::_debug_draw_cluster(Ref<RenderSceneBuffersRD> p_ren
 ////////////////////////////////////////////////////////////////////////////////
 // FOG SHADER
 
-void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes) {
+void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes, RID p_sdsm_directional_buffer) {
 	ERR_FAIL_COND(p_render_buffers.is_null());
 
 	Ref<RenderBufferDataForwardClustered> rb_data = p_render_buffers->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
@@ -1403,6 +1407,7 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.area_light_atlas = RendererRD::TextureStorage::get_singleton()->area_light_atlas_get_texture();
 		settings.directional_shadow_depth = RendererRD::LightStorage::get_singleton()->directional_shadow_get_texture();
 		settings.directional_light_buffer = RendererRD::LightStorage::get_singleton()->get_directional_light_buffer();
+		settings.sdsm_directional_light_buffer = p_sdsm_directional_buffer;
 
 		settings.vfog = fog;
 		settings.cluster_builder = rb_data->cluster_builder;
@@ -1668,7 +1673,8 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 		//render directional shadows
 		for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
-			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
+			const RenderShadowData &shadow = p_render_data->render_shadows[p_render_data->directional_shadows[i]];
+			_render_shadow_pass(shadow.light, p_render_data->shadow_atlas, shadow.pass, shadow.instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform, shadow.sdsm);
 		}
 		//render positional shadows
 		for (uint32_t i = 0; i < p_render_data->shadows.size(); i++) {
@@ -1746,7 +1752,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	uint32_t positional_light_count = 0;
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
 	if (p_render_data->scene_data->sdsm_enabled && sdsm != nullptr) {
-		light_storage->patch_sdsm_directional_lights(sdsm, *p_render_data->lights);
+		light_storage->publish_sdsm_directional_lights(sdsm, *p_render_data->lights);
 	}
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
 
@@ -1759,7 +1765,8 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	if (rb_data.is_valid()) {
 		RENDER_TIMESTAMP("Update Volumetric Fog");
 		bool directional_shadows = RendererRD::LightStorage::get_singleton()->has_directional_shadows(directional_light_count);
-		_update_volumetric_fog(rb, p_render_data->environment, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform, p_render_data->scene_data->prev_cam_transform.affine_inverse(), p_render_data->shadow_atlas, directional_light_count, directional_shadows, positional_light_count, p_render_data->voxel_gi_count, *p_render_data->fog_volumes);
+		_update_volumetric_fog(rb, p_render_data->environment, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform, p_render_data->scene_data->prev_cam_transform.affine_inverse(), p_render_data->shadow_atlas, directional_light_count, directional_shadows, positional_light_count, p_render_data->voxel_gi_count, *p_render_data->fog_volumes,
+				p_render_data->scene_data->sdsm_enabled && sdsm != nullptr ? sdsm->get_directional_light_buffer() : RID());
 	}
 }
 
@@ -2722,17 +2729,12 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 	}
 }
 
-void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
+void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform, bool p_sdsm) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
 	ERR_FAIL_COND(!light_storage->owns_light_instance(p_light));
 
 	RID base = light_storage->light_instance_get_base_light(p_light);
-	const bool gpu_sdsm = sdsm != nullptr && sdsm->has_light(p_light);
-	if (gpu_sdsm) {
-		// The fitted cascade resolution is GPU-only; retain full shadow mesh detail.
-		p_screen_mesh_lod_threshold = 0.0f;
-	}
 
 	Rect2i atlas_rect;
 	uint32_t atlas_size = 1;
@@ -2914,16 +2916,17 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 	} else {
 		//render shadow
-		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
-		if (gpu_sdsm) {
-			const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[scene_state.shadow_passes.size() - 1];
-			sdsm->patch_scene_data(p_light, p_pass, scene_state.uniform_buffers[shadow_pass.uniform_buffer_index], 0, !flip_y);
-		}
+		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform, p_sdsm ? p_light : RID(), p_sdsm ? uint32_t(p_pass) : UINT32_MAX);
 	}
 }
 
 void RenderForwardClustered::_render_shadow_begin() {
 	scene_state.shadow_passes.clear();
+	for (KeyValue<RID, SDSMPreparedLight> &light : sdsm_prepared_lights) {
+		sdsm_prepared_pool.resize(sdsm_prepared_pool.size() + 1);
+		sdsm_prepared_pool[sdsm_prepared_pool.size() - 1] = std::move(light.value);
+	}
+	sdsm_prepared_lights.clear();
 	RD::get_singleton()->draw_command_begin_label("Shadow Setup");
 	_update_render_base_uniform_set();
 
@@ -2932,7 +2935,7 @@ void RenderForwardClustered::_render_shadow_begin() {
 	// because _fill_instance_data will do that if it detects p_offset == 0u.
 }
 
-void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
+void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform, RID p_sdsm_light, uint32_t p_sdsm_cascade) {
 	SceneState::ShadowPass shadow_pass;
 
 	RenderSceneDataRD scene_data;
@@ -2949,6 +2952,7 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 	scene_data.time_step = time_step;
 	scene_data.main_cam_transform = p_main_cam_transform;
 	scene_data.shadow_pass = true;
+	scene_data.sdsm_enabled = p_sdsm_light.is_valid() && sdsm != nullptr && sdsm->has_light(p_sdsm_light);
 
 	RenderDataRD render_data;
 	render_data.scene_data = &scene_data;
@@ -2972,11 +2976,119 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 
 	PassMode pass_mode = p_use_dp ? PASS_MODE_SHADOW_DP : PASS_MODE_SHADOW;
 
-	uint32_t render_list_from = render_list[RENDER_LIST_SECONDARY].elements.size();
-	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode, false, false, false, true);
-	uint32_t render_list_size = render_list[RENDER_LIST_SECONDARY].elements.size() - render_list_from;
-	render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
-	_fill_instance_data(RENDER_LIST_SECONDARY, p_render_info ? p_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW] : (int *)nullptr, render_list_from, render_list_size, false);
+	uint32_t render_list_from;
+	uint32_t render_list_size;
+	SDSMPreparedLight *prepared = p_sdsm_light.is_valid() ? sdsm_prepared_lights.getptr(p_sdsm_light) : nullptr;
+	if (prepared && p_sdsm_cascade > 0) {
+		render_list_from = prepared->element_from;
+		render_list_size = prepared->element_count;
+	} else {
+		render_list_from = render_list[RENDER_LIST_SECONDARY].elements.size();
+		// The fitted cascade selects LOD on the GPU; fallback retains conservative base geometry.
+		if (p_sdsm_light.is_valid()) {
+			scene_data.screen_mesh_lod_threshold = 0.0f;
+		}
+		_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode, false, false, false, true);
+		render_list_size = render_list[RENDER_LIST_SECONDARY].elements.size() - render_list_from;
+		render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
+		_fill_instance_data(RENDER_LIST_SECONDARY, p_render_info ? p_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW] : (int *)nullptr, render_list_from, render_list_size, false);
+		if (p_sdsm_light.is_valid()) {
+			prepared = &sdsm_prepared_lights[p_sdsm_light];
+			if (!sdsm_prepared_pool.is_empty()) {
+				*prepared = std::move(sdsm_prepared_pool[sdsm_prepared_pool.size() - 1]);
+				sdsm_prepared_pool.resize(sdsm_prepared_pool.size() - 1);
+			}
+			prepared->elements.clear();
+			prepared->info.clear();
+			prepared->base_indices.clear();
+			prepared->nested.clear();
+			prepared->element_from = render_list_from;
+			prepared->element_count = render_list_size;
+			if (scene_data.sdsm_enabled) {
+				if (!sdsm_shadow_packets) {
+					sdsm_shadow_packets = memnew(RendererRD::SDSMShadowPackets);
+				}
+				RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+				for (uint32_t i = 0; i < p_instances.size(); i++) {
+					static_cast<GeometryInstanceForwardClustered *>(p_instances[i])->sdsm_caster_index = i;
+				}
+				auto &surfaces = prepared->surfaces;
+				auto &packets = prepared->packets;
+				auto &lods = prepared->lods;
+				auto &nested_commands = prepared->nested_commands;
+				surfaces.clear();
+				packets.clear();
+				lods.clear();
+				nested_commands.clear();
+				for (uint32_t i = 0; i < render_list_size;) {
+					GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + i];
+					RenderElementInfo info = render_list[RENDER_LIST_SECONDARY].element_info[render_list_from + i];
+					void *mesh_surface = surface->surface_shadow;
+					if (!mesh_surface) {
+						i += info.repeat;
+						continue;
+					}
+					const bool nested = (surface->owner->base_flags & (INSTANCE_DATA_FLAG_MULTIMESH | INSTANCE_DATA_FLAG_PARTICLES)) != 0;
+					const bool indirect = (surface->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT) != 0;
+					const bool points = surface->shader_shadow->uses_point_size && scene_shader.emulate_point_size;
+					const uint32_t lod_count = points ? 1 : mesh_storage->mesh_surface_get_lod_count(mesh_surface);
+					const uint32_t packet_begin = packets.size();
+					for (uint32_t lod = 0; lod < lod_count; lod++) {
+						RendererRD::SDSMShadowPackets::Packet packet = {};
+						packet.count = points ? 6 : mesh_storage->mesh_surface_get_lod_index_count(mesh_surface, lod);
+						packet.flags = (!points && mesh_storage->mesh_surface_get_index_array(mesh_surface, lod).is_valid() ? 1u : 0u) | (nested ? 2u : 0u) | (indirect ? 4u : 0u) | (points ? 8u : 0u) | (indirect && mesh_storage->mesh_surface_get_index_array(surface->surface, 0).is_valid() ? 16u : 0u);
+						if (!(packet.flags & 1u) && !points) {
+							packet.count = mesh_storage->mesh_surface_get_vertex_count(mesh_surface);
+						}
+						packet.source_offset = surface->surface_index * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE;
+						packet.instance_multiplier = points ? mesh_storage->mesh_surface_get_vertex_count(mesh_surface) : 1;
+						packet.lod = lod;
+						packets.push_back(packet);
+						nested_commands.push_back(indirect ? mesh_storage->_multimesh_get_command_buffer_rd_rid(surface->owner->data->base) : RID());
+						prepared->elements.push_back(surface);
+						info.lod_index = lod;
+						info.repeat = 1;
+						prepared->info.push_back(info);
+						prepared->base_indices.push_back(render_list_from + i);
+						prepared->nested.push_back(nested ? 1u : 0u);
+					}
+					// All instances in this draw group share the same LOD bindings.
+					const uint32_t first_lod = lods.size();
+					for (uint32_t lod = 0; lod < lod_count; lod++) {
+						RendererRD::SDSMShadowPackets::LOD metadata = {};
+						metadata.edge_length = mesh_storage->mesh_surface_get_lod_edge_length(mesh_surface, lod);
+						metadata.packet = packet_begin + lod;
+						metadata.index_count = packets[packet_begin + lod].count;
+						lods.push_back(metadata);
+					}
+					const uint32_t repeat = render_list[RENDER_LIST_SECONDARY].element_info[render_list_from + i].repeat;
+					for (uint32_t j = 0; j < repeat; j++) {
+						GeometryInstanceSurfaceDataCache *candidate = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + i + j];
+						RendererRD::SDSMShadowPackets::Surface record = {};
+						record.caster = candidate->owner->sdsm_caster_index;
+						record.instance = render_list_from + i + j;
+						record.packet = first_lod;
+						record.lod_count = lod_count;
+						record.model_scale = candidate->owner->lod_model_scale * candidate->owner->lod_bias;
+						record.lod_threshold = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DISABLE_LOD ? 0.0f : p_screen_mesh_lod_threshold * p_viewport_size.x;
+						record.instance_count = candidate->owner->instance_count;
+						if (candidate->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
+							record.instance_count /= candidate->owner->trail_steps;
+						}
+						record.flags = (nested ? 1u : 0u) | (points ? 2u : 0u);
+						surfaces.push_back(record);
+					}
+					i += repeat;
+				}
+				RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+				const auto mode = light_storage->light_directional_get_shadow_mode(light_storage->light_instance_get_base_light(p_sdsm_light));
+				const uint32_t cascade_count = mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_4_SPLITS ? 4 : mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 2
+																																									 : 1;
+				sdsm_shadow_packets->prepare(prepared->gpu, surfaces, packets, lods, cascade_count);
+				sdsm_shadow_packets->dispatch(prepared->gpu, sdsm->get_result_buffer(p_sdsm_light), sdsm->get_caster_buffer(p_sdsm_light), nested_commands);
+			}
+		}
+	}
 
 	{
 		//regular forward for now
@@ -3001,6 +3113,8 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 		shadow_pass.framebuffer = p_framebuffer;
 		shadow_pass.clear_depth = p_begin || p_clear_region;
 		shadow_pass.rect = p_rect;
+		shadow_pass.sdsm_light = p_sdsm_light;
+		shadow_pass.sdsm_cascade = scene_data.sdsm_enabled ? p_sdsm_cascade : UINT32_MAX;
 
 		shadow_pass.uniform_buffer_index = uniform_buffer_index;
 
@@ -3019,7 +3133,8 @@ void RenderForwardClustered::_render_shadow_process() {
 	for (uint32_t i = 0; i < scene_state.shadow_passes.size(); i++) {
 		//render passes need to be configured after instance buffer is done, since they need the latest version
 		SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[i];
-		shadow_pass.rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), shadow_pass.uniform_buffer_index, false);
+		const SDSMPreparedLight *prepared = sdsm_prepared_lights.getptr(shadow_pass.sdsm_light);
+		shadow_pass.rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), shadow_pass.uniform_buffer_index, false, prepared ? prepared->gpu.visibility : RID(), shadow_pass.sdsm_cascade != UINT32_MAX ? sdsm->get_result_buffer(shadow_pass.sdsm_light) : RID());
 	}
 
 	RD::get_singleton()->draw_command_end_label();
@@ -3029,6 +3144,17 @@ void RenderForwardClustered::_render_shadow_end() {
 
 	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+		SDSMPreparedLight *prepared = sdsm_prepared_lights.getptr(shadow_pass.sdsm_light);
+		if (prepared && shadow_pass.sdsm_cascade != UINT32_MAX && prepared->gpu.commands.is_valid()) {
+			render_list_parameters.elements = prepared->elements.ptr();
+			render_list_parameters.element_info = prepared->info.ptr();
+			render_list_parameters.element_count = prepared->elements.size();
+			render_list_parameters.sdsm_base_indices = prepared->base_indices.ptr();
+			render_list_parameters.sdsm_nested = prepared->nested.ptr();
+			render_list_parameters.sdsm_commands = prepared->gpu.commands;
+			render_list_parameters.sdsm_packet_count = prepared->gpu.packet_count;
+			render_list_parameters.sdsm_cascade = shadow_pass.sdsm_cascade;
+		}
 		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
 	}
 
@@ -3506,7 +3632,20 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
-RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas) {
+void RenderForwardClustered::_ensure_sdsm_default_buffers() {
+	if (sdsm_default_visibility.is_valid()) {
+		return;
+	}
+	Vector<uint8_t> zero;
+	zero.resize_initialized(16);
+	sdsm_default_visibility = RD::get_singleton()->storage_buffer_create(zero.size(), zero);
+	zero.resize_initialized(sizeof(RendererRD::SDSM::Result));
+	sdsm_default_result = RD::get_singleton()->uniform_buffer_create(zero.size(), zero);
+	zero.resize_initialized(RendererRD::LightStorage::get_singleton()->get_max_directional_lights() * sizeof(RendererRD::SDSM::Result));
+	sdsm_default_directional = RD::get_singleton()->uniform_buffer_create(zero.size(), zero);
+}
+
+RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, RID p_sdsm_visibility, RID p_sdsm_result) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
@@ -3527,6 +3666,16 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 
 	thread_local LocalVector<RD::Uniform> uniforms;
 	uniforms.clear();
+	_ensure_sdsm_default_buffers();
+	for (uint32_t binding = 39; binding <= 41; binding++) {
+		RD::Uniform u;
+		u.binding = binding;
+		u.uniform_type = binding == 39 ? RD::UNIFORM_TYPE_STORAGE_BUFFER : RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+		RID buffer = binding == 39 ? (p_sdsm_visibility.is_valid() ? p_sdsm_visibility : sdsm_default_visibility) : binding == 40 ? (p_sdsm_result.is_valid() ? p_sdsm_result : sdsm_default_result)
+																																  : (sdsm ? sdsm->get_directional_light_buffer() : RID());
+		u.append_id(buffer.is_valid() ? buffer : sdsm_default_directional);
+		uniforms.push_back(u);
+	}
 
 	{
 		RD::Uniform u;
@@ -3925,6 +4074,10 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	thread_local LocalVector<RD::Uniform> uniforms;
 	uniforms.clear();
+	_ensure_sdsm_default_buffers();
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 39, sdsm_default_visibility));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 40, sdsm_default_result));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 41, sdsm_default_directional));
 
 	{
 		RD::Uniform u;
@@ -5423,6 +5576,20 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	if (sdsm_shadow_packets) {
+		for (KeyValue<RID, SDSMPreparedLight> &light : sdsm_prepared_lights) {
+			sdsm_shadow_packets->free(light.value.gpu);
+		}
+		for (SDSMPreparedLight &light : sdsm_prepared_pool) {
+			sdsm_shadow_packets->free(light.gpu);
+		}
+		memdelete(sdsm_shadow_packets);
+	}
+	if (sdsm_default_visibility.is_valid()) {
+		RD::get_singleton()->free_rid(sdsm_default_visibility);
+		RD::get_singleton()->free_rid(sdsm_default_result);
+		RD::get_singleton()->free_rid(sdsm_default_directional);
+	}
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;

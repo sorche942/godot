@@ -52,9 +52,13 @@ class SDSM {
 	Vector<GLuint> depth_textures;
 	Vector<Level> levels;
 	Level depth_ranges;
+	Vector<Level> paired_levels; // Receiver maxima reduced alongside minima.
+	Level tile_summary[3]; // Depth interval, light-space minimum, light-space maximum.
 	Level splits;
 	Level bounds;
 	Level fitted_bounds;
+	Level final_bounds;
+	Vector<Level> caster_levels;
 	Level cameras;
 	GLuint records_texture = 0;
 	int records_height = 0;
@@ -68,7 +72,7 @@ class SDSM {
 	bool _unsupported();
 	bool _create_target(Level &r_target, const Size2i &p_size);
 	void _bind_source(GLuint p_texture, int p_unit);
-	void _draw(const Level &p_target, const Rect2i &p_rect);
+	void _draw(const Level &p_target, const Rect2i &p_rect, int p_color_count = 1);
 	void _reduce(GLuint p_depth, const Projection &p_inverse_projection, const Transform3D &p_view_to_camera, const Transform3D &p_camera_to_light, int p_operation, int p_cascade);
 	void _copy_result(const Level &p_target, int p_x, int p_y);
 

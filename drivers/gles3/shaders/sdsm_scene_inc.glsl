@@ -16,7 +16,7 @@ mat4 sdsm_camera_matrix(int column, int row) {
 void sdsm_set_camera(inout SceneData data) {
 	if (sdsm_shadow_row >= 0 && texelFetch(sdsm_camera_texture, ivec2(0, sdsm_shadow_row), 0).w > 0.0) {
 		data.projection_matrix = sdsm_camera_matrix(4, sdsm_shadow_row);
-		data.inv_projection_matrix = inverse(data.projection_matrix);
+		data.inv_projection_matrix = sdsm_camera_matrix(16, sdsm_shadow_row);
 		data.view_matrix = sdsm_camera_matrix(8, sdsm_shadow_row);
 		data.inv_view_matrix = sdsm_camera_matrix(12, sdsm_shadow_row);
 		// Stored matrices are main-camera-relative; builtins still describe world space.

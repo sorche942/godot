@@ -269,6 +269,7 @@ private:
 
 	MultiMesh *multimesh_dirty_list = nullptr;
 
+	void _multimesh_update_command_buffer(MultiMesh *p_multimesh);
 	_FORCE_INLINE_ void _multimesh_make_local(MultiMesh *multimesh) const;
 	_FORCE_INLINE_ void _multimesh_enable_motion_vectors(MultiMesh *multimesh);
 	_FORCE_INLINE_ void _multimesh_update_motion_vectors_data_cache(MultiMesh *multimesh);
@@ -460,6 +461,21 @@ public:
 	_FORCE_INLINE_ bool mesh_surface_has_lod(void *p_surface) const {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
 		return s->lod_count > 0;
+	}
+
+	// LOD 0 is the original surface, matching mesh_surface_get_index_array().
+	_FORCE_INLINE_ uint32_t mesh_surface_get_lod_count(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->lod_count + 1;
+	}
+
+	_FORCE_INLINE_ float mesh_surface_get_lod_edge_length(void *p_surface, uint32_t p_lod) const {
+		const Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return p_lod == 0 ? 0.0f : surface->lods[p_lod - 1].edge_length;
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_lod_index_count(void *p_surface, uint32_t p_lod) const {
+		const Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
+		return p_lod == 0 ? (surface->index_count ? surface->index_count : surface->vertex_count) : surface->lods[p_lod - 1].index_count;
 	}
 
 	_FORCE_INLINE_ uint32_t mesh_surface_get_vertices_drawn_count(void *p_surface) const {

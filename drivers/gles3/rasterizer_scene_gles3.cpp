@@ -2224,7 +2224,34 @@ void RasterizerSceneGLES3::_render_shadows(const RenderDataGLES3 *p_render_data,
 		}
 		// Render directional shadows.
 		for (uint32_t i = 0; i < directional_shadows.size(); i++) {
-			_render_shadow_pass(p_render_data->render_shadows[directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[directional_shadows[i]].pass, p_render_data->render_shadows[directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->screen_mesh_lod_threshold, p_render_data->render_info, p_viewport_size, p_render_data->cam_transform);
+			const RenderShadowData &shadow = p_render_data->render_shadows[directional_shadows[i]];
+			if (shadow.sdsm) {
+				if (shadow.pass != 0) {
+					continue;
+				}
+				bool prepared = false;
+				uint64_t prepared_primitives = 0;
+				for (uint32_t j = 0; j < directional_shadows.size(); j++) {
+					const RenderShadowData &cascade = p_render_data->render_shadows[directional_shadows[j]];
+					if (cascade.light != shadow.light) {
+						continue;
+					}
+					// The broad pass-zero candidates are also conservative for CSM
+					// when this camera cannot use float fitting or vertex sampling.
+					uint64_t primitives_before = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] : 0;
+					_render_shadow_pass(cascade.light, p_render_data->shadow_atlas, cascade.pass, shadow.instances, lod_distance_multiplier, p_render_data->screen_mesh_lod_threshold, p_render_data->render_info, p_viewport_size, p_render_data->cam_transform, prepared, true);
+					if (p_render_data->render_info) {
+						if (prepared) {
+							p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += prepared_primitives;
+						} else {
+							prepared_primitives = p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] - primitives_before;
+						}
+					}
+					prepared = true;
+				}
+			} else {
+				_render_shadow_pass(shadow.light, p_render_data->shadow_atlas, shadow.pass, shadow.instances, lod_distance_multiplier, p_render_data->screen_mesh_lod_threshold, p_render_data->render_info, p_viewport_size, p_render_data->cam_transform);
+			}
 		}
 		// Render positional shadows (Spotlight, Arealight, and Omnilight with dual-paraboloid).
 		for (uint32_t i = 0; i < shadows.size(); i++) {
@@ -2233,7 +2260,7 @@ void RasterizerSceneGLES3::_render_shadows(const RenderDataGLES3 *p_render_data,
 	}
 }
 
-void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
+void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform, bool p_reuse_render_list, bool p_sdsm_candidates) {
 	GLES3::LightStorage *light_storage = GLES3::LightStorage::get_singleton();
 
 	ERR_FAIL_COND(!light_storage->owns_light_instance(p_light));
@@ -2383,14 +2410,16 @@ void RasterizerSceneGLES3::_render_shadow_pass(RID p_light, RID p_shadow_atlas, 
 
 	_setup_environment(&render_data, true, p_viewport_size, false, Color(), use_pancake, shadow_bias);
 
-	if (sdsm_shadow_row >= 0 || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DISABLE_LOD) {
+	if (p_sdsm_candidates || sdsm_shadow_row >= 0 || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DISABLE_LOD) {
 		render_data.screen_mesh_lod_threshold = 0.0;
 	} else {
 		render_data.screen_mesh_lod_threshold = p_screen_mesh_lod_threshold;
 	}
 
-	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, PASS_MODE_SHADOW);
-	render_list[RENDER_LIST_SECONDARY].sort_by_key();
+	if (!p_reuse_render_list) {
+		_fill_render_list(RENDER_LIST_SECONDARY, &render_data, PASS_MODE_SHADOW);
+		render_list[RENDER_LIST_SECONDARY].sort_by_key();
+	}
 
 	glBindFramebuffer(GL_FRAMEBUFFER, shadow_fb);
 	glViewport(atlas_rect.position.x, atlas_rect.position.y, atlas_rect.size.x, atlas_rect.size.y);
@@ -2569,7 +2598,7 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 	sdsm->reduce_depth(inverse_projection, view_to_camera);
 	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 		const RenderShadowData &shadow = p_render_data->render_shadows[i];
-		if (shadow.pass != 0 || light_storage->light_instance_get_type(shadow.light) != RSE::LIGHT_DIRECTIONAL) {
+		if (!shadow.sdsm || shadow.pass != 0 || light_storage->light_instance_get_type(shadow.light) != RSE::LIGHT_DIRECTIONAL) {
 			continue;
 		}
 		RendererSDSM::Light light;
@@ -2579,11 +2608,13 @@ void RasterizerSceneGLES3::_update_sdsm(RenderDataGLES3 *p_render_data, const Ca
 					p_render_data->render_shadows, p_render_data->render_shadow_count)) {
 			continue;
 		}
-		const LocalVector<RendererSDSM::Caster> &casters = sdsm_fitter.collect_casters(light, p_render_data->render_shadows);
+		const LocalVector<RendererSDSM::Caster> &casters = sdsm_fitter.prepare_casters(light, shadow.instances, true);
 		if (sdsm->fit_light(inverse_projection, view_to_camera, light, extra_receivers, casters)) {
 			sdsm_active = true;
 		}
 	}
+	// A late raster-target allocation failure invalidates the whole camera fit.
+	sdsm_active &= sdsm->get_camera_texture() != 0;
 	scene_state.reset_gl_state();
 }
 
@@ -2593,7 +2624,10 @@ void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_
 	RENDER_TIMESTAMP("Setup 3D Scene");
 	// All passes for this camera use one mode snapshot. Capability fallbacks
 	// below also select CSM filtering, rather than only CSM shadow matrices.
-	const bool sdsm_enabled = RendererSDSM::is_enabled();
+	bool sdsm_enabled = false;
+	for (int i = 0; i < p_render_shadow_count; i++) {
+		sdsm_enabled |= p_render_shadows[i].sdsm;
+	}
 	sdsm_active = false;
 	sdsm_shadow_row = -1;
 

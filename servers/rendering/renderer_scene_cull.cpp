@@ -35,6 +35,7 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
+#include "servers/rendering/renderer_sdsm.h"
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -2218,6 +2219,11 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	cull.shadows[p_shadow_index].cascade_count = splits;
 	cull.shadows[p_shadow_index].light_instance = light->instance;
 	cull.shadows[p_shadow_index].caster_mask = RSG::light_storage->light_get_shadow_caster_mask(p_instance->base);
+	cull.shadows[p_shadow_index].sdsm = RendererSDSM::is_enabled();
+	cull.shadows[p_shadow_index].candidate_count = cull.shadows[p_shadow_index].sdsm ? 1 : splits;
+	if (cull.shadows[p_shadow_index].sdsm) {
+		cull.shadows[p_shadow_index].candidate_frustum = Frustum(RendererSDSM::candidate_planes(p_cam_projection, p_cam_transform, light_transform.basis, max_distance, texture_size, RSG::light_storage->light_get_param(p_instance->base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS), RSG::light_storage->light_get_param(p_instance->base, RSE::LIGHT_PARAM_SIZE), RSG::light_storage->light_get_param(p_instance->base, RSE::LIGHT_PARAM_SHADOW_BLUR)));
+	}
 
 	for (int i = 0; i < splits; i++) {
 		RENDER_TIMESTAMP("Cull DirectionalLight3D, Split " + itos(i));
@@ -2444,6 +2450,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					p_scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(planes.ptr(), planes.size(), points.ptr(), points.size(), cull_convex);
 
 					RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
+					shadow_data.sdsm = false;
 
 					if (!light->is_shadow_update_full()) {
 						light_culler->cull_regular_light(instance_shadow_cull_result);
@@ -2528,6 +2535,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					p_scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(planes.ptr(), planes.size(), points.ptr(), points.size(), cull_convex);
 
 					RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
+					shadow_data.sdsm = false;
 
 					if (!light->is_shadow_update_full()) {
 						light_culler->cull_regular_light(instance_shadow_cull_result);
@@ -2597,6 +2605,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 			p_scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(planes.ptr(), planes.size(), points.ptr(), points.size(), cull_convex);
 
 			RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
+			shadow_data.sdsm = false;
 
 			if (!light->is_shadow_update_full()) {
 				light_culler->cull_regular_light(instance_shadow_cull_result);
@@ -2664,6 +2673,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 			p_scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(planes.ptr(), planes.size(), points.ptr(), points.size(), cull_convex);
 
 			RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
+			shadow_data.sdsm = false;
 
 			if (!light->is_shadow_update_full()) {
 				light_culler->cull_regular_light(instance_shadow_cull_result);
@@ -3257,11 +3267,14 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 			}
 
 			for (uint32_t j = 0; j < cull_data.cull->shadow_count; j++) {
-				for (uint32_t k = 0; k < cull_data.cull->shadows[j].cascade_count; k++) {
-					if (!light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j, k)) { // pass the cascade index
+				const Cull::Shadow &shadow = cull_data.cull->shadows[j];
+				for (uint32_t k = 0; k < shadow.candidate_count; k++) {
+					// The split receiver hull rejects off-screen casters needed by
+					// dynamically fitted partitions. SDSM uses its own broad volume.
+					if (!shadow.sdsm && !light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j, k)) {
 						continue;
 					}
-					if (IN_FRUSTUM(cull_data.cull->shadows[j].cascades[k].frustum) && VIS_CHECK) {
+					if (IN_FRUSTUM(shadow.sdsm ? shadow.candidate_frustum : shadow.cascades[k].frustum) && VIS_CHECK) {
 						uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 
 						const bool is_inactive_particle = (base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(idata.base_rid);
@@ -3507,7 +3520,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 				render_shadow_data[max_shadows_used].light = cull.shadows[i].light_instance;
 				render_shadow_data[max_shadows_used].pass = j;
-				render_shadow_data[max_shadows_used].instances.merge_unordered(scene_cull_result.directional_shadows[i].cascade_geometry_instances[j]);
+				render_shadow_data[max_shadows_used].sdsm = cull.shadows[i].sdsm;
+				if (!cull.shadows[i].sdsm || j == 0) {
+					render_shadow_data[max_shadows_used].instances.merge_unordered(scene_cull_result.directional_shadows[i].cascade_geometry_instances[j]);
+				}
 				max_shadows_used++;
 			}
 		}
@@ -3731,6 +3747,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	for (uint32_t i = 0; i < max_shadows_used; i++) {
 		render_shadow_data[i].instances.clear();
+		render_shadow_data[i].sdsm = false;
 	}
 	max_shadows_used = 0;
 

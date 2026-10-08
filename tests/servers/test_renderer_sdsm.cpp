@@ -41,54 +41,59 @@ public:
 	Transform3D transform;
 	AABB bounds = AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2));
 
-	Transform3D get_transform() override { return transform; }
-	AABB get_aabb() override { return bounds; }
+	Transform3D get_transform() override {
+		return transform;
+	}
+	AABB get_aabb() override {
+		return bounds;
+	}
 };
 
-TEST_CASE("[Rendering][SDSM] Dynamic cascades retain every original caster") {
-	PagedArrayPool<RenderGeometryInstance *> pool;
-	RendererSceneRender::RenderShadowData shadows[4];
-	for (auto &shadow : shadows) {
-		shadow.instances.set_page_pool(&pool);
-	}
-	CasterInstance near_caster;
-	CasterInstance middle_caster;
-	CasterInstance far_caster;
-	CasterInstance other_light_caster;
-	shadows[0].instances.push_back(&near_caster);
-	shadows[1].instances.push_back(&middle_caster);
-	shadows[2].instances.push_back(&near_caster);
-	shadows[2].instances.push_back(&far_caster);
-	shadows[3].instances.push_back(&other_light_caster);
-
-	RendererSDSM::Light light;
-	light.cascade_count = 3;
-	for (int i = 0; i < 3; i++) {
-		light.shadow_indices[i] = i;
-	}
-	RendererSDSM sdsm;
-	const auto &casters = sdsm.collect_casters(light, shadows);
-	REQUIRE(casters.size() == 3);
-	for (int i = 0; i < 3; i++) {
-		HashSet<RenderGeometryInstance *> members;
-		for (uint64_t j = 0; j < shadows[i].instances.size(); j++) {
-			members.insert(shadows[i].instances[j]);
+static bool inside_volume(const Vector<Plane> &p_planes, const Vector3 &p_point) {
+	for (const Plane &plane : p_planes) {
+		if (plane.distance_to(p_point) > 0.001) {
+			return false;
 		}
-		CHECK(members.size() == 3);
-		CHECK(members.has(&near_caster));
-		CHECK(members.has(&middle_caster));
-		CHECK(members.has(&far_caster));
-		CHECK_FALSE(members.has(&other_light_caster));
 	}
-	REQUIRE(shadows[3].instances.size() == 1);
-	CHECK(shadows[3].instances[0] == &other_light_caster);
+	return true;
+}
 
-	// A subsequent light or frame must not inherit the previous union.
-	light.cascade_count = 1;
-	light.shadow_indices[0] = 3;
-	const auto &next_casters = sdsm.collect_casters(light, shadows);
-	REQUIRE(next_casters.size() == 1);
-	CHECK(next_casters[0].instance == &other_light_caster);
+TEST_CASE("[Rendering][SDSM] Full-distance volume retains off-screen upstream casters") {
+	Projection projection;
+	projection.set_perspective(70, 1.7, 0.1, 100);
+	const Transform3D camera(Basis(Vector3(1, 0, 0), 0.3), Vector3(10000, 20, -5000));
+	const Basis light_basis(Vector3(0, 1, 0), 0.6);
+	const Vector<Plane> planes = RendererSDSM::candidate_planes(projection, camera, light_basis, 100, 2048, 2, 0, 1);
+	Vector3 endpoints[8];
+	REQUIRE(projection.get_endpoints(camera, endpoints));
+	const Vector3 upstream = light_basis.get_column(2) * 2000000;
+	for (const Vector3 &endpoint : endpoints) {
+		CHECK(inside_volume(planes, endpoint));
+		CHECK(inside_volume(planes, endpoint + upstream));
+	}
+	CHECK_FALSE(inside_volume(planes, camera.origin - upstream));
+}
+
+TEST_CASE("[Rendering][SDSM] Angular soft shadows retain arbitrarily distant lateral occluders") {
+	Projection projection;
+	projection.set_orthogonal(20, 1.5, 0.1, 50);
+	const Vector<Plane> planes = RendererSDSM::candidate_planes(projection, Transform3D(), Basis(), 50, 1024, 2, 2, 1);
+	CHECK(inside_volume(planes, Vector3(100000, -100000, 1000000)));
+	CHECK_FALSE(inside_volume(planes, Vector3(0, 0, -1000)));
+}
+
+TEST_CASE("[Rendering][SDSM] Asymmetric camera footprint and normal padding remain conservative") {
+	Projection projection;
+	projection.set_frustum(-0.3, 0.8, -0.2, 0.4, 0.5, 40);
+	const Vector<Plane> planes = RendererSDSM::candidate_planes(projection, Transform3D(), Basis(), 20, 512, 3, 0, 0);
+	Vector3 endpoints[8];
+	REQUIRE(projection.get_endpoints(Transform3D(), endpoints));
+	for (int i = 0; i < 4; i++) {
+		const Vector3 far_point = endpoints[i + 4].lerp(endpoints[i], real_t(19.5 / 39.5));
+		CHECK(inside_volume(planes, far_point));
+		CHECK(inside_volume(planes, far_point + Vector3(0.01, 0, 0)));
+	}
+	CHECK_FALSE(inside_volume(planes, Vector3(1000, 0, -10)));
 }
 
 TEST_CASE("[Rendering][SDSM] Caster fitting inputs retain rotated large-world bounds") {
@@ -103,7 +108,7 @@ TEST_CASE("[Rendering][SDSM] Caster fitting inputs retain rotated large-world bo
 	light.shadow_indices[0] = 0;
 	light.light_to_world = Transform3D(Basis(Vector3(0, 1, 0), Math::PI / 2), Vector3(10000, 0, 0));
 	RendererSDSM sdsm;
-	const auto &casters = sdsm.collect_casters(light, &shadow);
+	const auto &casters = sdsm.prepare_casters(light, shadow.instances, true);
 	REQUIRE(casters.size() == 1);
 	CHECK(casters[0].bounds.position.is_equal_approx(Vector3(4, -1, -1)));
 	CHECK(casters[0].bounds.size.is_equal_approx(Vector3(2, 2, 2)));

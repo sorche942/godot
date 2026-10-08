@@ -1368,7 +1368,7 @@ bool RendererSceneRenderRD::_sdsm_needed(const RenderDataRD *p_render_data) cons
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 		RID base = light_storage->light_instance_get_base_light(p_render_data->render_shadows[i].light);
-		if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
+		if (p_render_data->render_shadows[i].sdsm && light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
 			return true;
 		}
 	}
@@ -1412,7 +1412,7 @@ void RendererSceneRenderRD::_process_sdsm(RenderDataRD *p_render_data, const Vec
 	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 		RID instance = p_render_data->render_shadows[i].light;
 		RID base = light_storage->light_instance_get_base_light(instance);
-		if (p_render_data->render_shadows[i].pass != 0 || light_storage->light_get_type(base) != RSE::LIGHT_DIRECTIONAL) {
+		if (!p_render_data->render_shadows[i].sdsm || p_render_data->render_shadows[i].pass != 0 || light_storage->light_get_type(base) != RSE::LIGHT_DIRECTIONAL) {
 			continue;
 		}
 		RendererSDSM::Light light;
@@ -1435,7 +1435,7 @@ void RendererSceneRenderRD::_process_sdsm(RenderDataRD *p_render_data, const Vec
 			settings.fog_far_size = near_size.lerp(projection.get_far_plane_half_extents(), (fog_length - projection.get_z_near()) / (projection.get_z_far() - projection.get_z_near()));
 			settings.fog_near_size = projection.is_orthogonal() ? settings.fog_far_size : near_size.maxf(0.001);
 		}
-		const LocalVector<RendererSDSM::Caster> &casters = sdsm_fitter.collect_casters(light, p_render_data->render_shadows);
+		const LocalVector<RendererSDSM::Caster> &casters = sdsm_fitter.prepare_casters(light, p_render_data->render_shadows[light.shadow_indices[0]].instances, false);
 		sdsm->fit_light(light, casters, p_extra_receivers, settings);
 	}
 }
@@ -1458,8 +1458,13 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 
 	// setup scene data
 	RenderSceneDataRD scene_data;
-	scene_data.sdsm_enabled = RendererSDSM::is_enabled();
-	// All passes and filtering for this camera use the same live mode snapshot.
+	// Consume the cull snapshot, not a second setting read midway through a frame.
+	for (int i = 0; i < p_render_shadow_count; i++) {
+		if (p_render_shadows[i].sdsm) {
+			scene_data.sdsm_enabled = true;
+			break;
+		}
+	}
 	{
 		// Our first camera is used by default
 		scene_data.cam_transform = p_camera_data->main_transform;

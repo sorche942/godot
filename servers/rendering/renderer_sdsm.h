@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include "core/templates/hash_set.h"
 #include "core/templates/local_vector.h"
 #include "servers/rendering/renderer_scene_render.h"
 
@@ -61,11 +60,13 @@ public:
 	static bool is_enabled();
 	static bool prepare_light(Light &r_light, RID p_instance, RID p_base, const Transform3D &p_light_transform, const Projection &p_camera_projection, const Transform3D &p_camera_transform, bool p_orthogonal, RendererSceneRender::RenderShadowData *p_shadows, int p_shadow_count);
 
-	// GPU-selected split boundaries may cross every original CSM interval.
-	// Each cascade therefore needs their union; the fitted GPU camera clips it.
-	const LocalVector<Caster> &collect_casters(const Light &p_light, RendererSceneRender::RenderShadowData *p_shadows);
+	// Full-distance receiver footprint extruded upstream toward the light.
+	static Vector<Plane> candidate_planes(const Projection &p_camera_projection, const Transform3D &p_camera_transform, const Basis &p_light_basis, real_t p_shadow_far, real_t p_texture_size, real_t p_normal_bias, real_t p_soft_angle, real_t p_blur);
+
+	// Candidates are unique and remain owned by the cull invocation. RD derives
+	// bounds on the GPU; Compatibility requests exact camera-relative bounds.
+	const LocalVector<Caster> &prepare_casters(const Light &p_light, const PagedArray<RenderGeometryInstance *> &p_candidates, bool p_light_space_bounds);
 
 private:
-	HashSet<RenderGeometryInstance *> caster_set;
 	LocalVector<Caster> casters;
 };

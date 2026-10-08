@@ -730,7 +730,7 @@ void LightStorage::set_max_lights(const uint32_t p_max_lights) {
 	max_directional_lights = RendererSceneRender::MAX_DIRECTIONAL_LIGHTS;
 	uint32_t directional_light_buffer_size = max_directional_lights * sizeof(DirectionalLightData);
 	directional_lights = memnew_arr(DirectionalLightData, max_directional_lights);
-	directional_light_buffer = RD::get_singleton()->uniform_buffer_create(directional_light_buffer_size, {}, RD::BUFFER_CREATION_AS_STORAGE_BIT);
+	directional_light_buffer = RD::get_singleton()->uniform_buffer_create(directional_light_buffer_size);
 }
 
 void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const PagedArray<RID> &p_lights, const Transform3D &p_camera_transform, RID p_shadow_atlas, bool p_using_shadows, uint32_t &r_directional_light_count, uint32_t &r_positional_light_count, bool &r_directional_light_soft_shadows) {
@@ -1287,23 +1287,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 	}
 }
 
-void LightStorage::patch_sdsm_directional_lights(SDSM *p_sdsm, const PagedArray<RID> &p_lights) {
+void LightStorage::publish_sdsm_directional_lights(SDSM *p_sdsm, const PagedArray<RID> &p_lights) {
 	ERR_FAIL_NULL(p_sdsm);
-	// Word offsets shared with the SDSM directional UBO patch shader.
-	static_assert(sizeof(DirectionalLightData) == 116 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, fade_from) == 14 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, fade_to) == 15 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, shadow_bias) == 20 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, shadow_normal_bias) == 24 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, shadow_transmittance_bias) == 28 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, shadow_z_range) == 32 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, shadow_range_begin) == 36 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, shadow_split_offsets) == 40 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, shadow_matrices) == 44 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, uv_scale1) == 108 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, uv_scale2) == 110 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, uv_scale3) == 112 * sizeof(float));
-	static_assert(offsetof(DirectionalLightData, uv_scale4) == 114 * sizeof(float));
 	uint32_t directional_index = 0;
 	for (uint32_t i = 0; i < p_lights.size(); i++) {
 		const RID instance = p_lights[i];
@@ -1323,7 +1308,7 @@ void LightStorage::patch_sdsm_directional_lights(SDSM *p_sdsm, const PagedArray<
 			for (uint32_t cascade = 0; cascade < 4; cascade++) {
 				atlas_rects[cascade] = light_instance->shadow_transform[cascade].atlas_rect;
 			}
-			p_sdsm->patch_directional_light(instance, directional_index, directional_light_buffer, atlas_rects,
+			p_sdsm->publish_directional_light(instance, directional_index, atlas_rects,
 					light->param[RSE::LIGHT_PARAM_SHADOW_BIAS], light->param[RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS],
 					light->param[RSE::LIGHT_PARAM_TRANSMITTANCE_BIAS], directional_lights[directional_index].soft_shadow_scale,
 					light->param[RSE::LIGHT_PARAM_SHADOW_FADE_START]);

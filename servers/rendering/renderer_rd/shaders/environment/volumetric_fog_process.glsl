@@ -47,6 +47,18 @@ layout(set = 0, binding = 6, std140) uniform DirectionalLights {
 }
 directional_lights;
 
+#ifdef MODE_DENSITY
+#include "../sdsm_data_inc.glsl"
+#include "../sdsm_light_inc.glsl"
+layout(set = 2, binding = 0, std140) uniform SdsmDirectionalResults {
+	SdsmResult data[MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS];
+} sdsm_directional_results;
+
+DirectionalLightData sdsm_directional_light(uint index) {
+	return sdsm_apply_directional_light(directional_lights.data[index], sdsm_directional_results.data[index]);
+}
+#endif
+
 layout(set = 0, binding = 7, std430) buffer restrict readonly ClusterBuffer {
 	uint data[];
 }
@@ -396,47 +408,47 @@ void main() {
 
 	if (total_density > 0.00005) {
 		for (uint i = 0; i < params.directional_light_count; i++) {
-			if (directional_lights.data[i].volumetric_fog_energy > 0.001) {
+			if (sdsm_directional_light(i).volumetric_fog_energy > 0.001) {
 				vec3 shadow_attenuation = vec3(1.0);
 
-				if (directional_lights.data[i].shadow_opacity > 0.001) {
+				if (sdsm_directional_light(i).shadow_opacity > 0.001) {
 					float depth_z = -view_pos.z;
 
 					vec4 pssm_coord;
-					vec3 light_dir = directional_lights.data[i].direction;
+					vec3 light_dir = sdsm_directional_light(i).direction;
 					vec4 v = vec4(view_pos, 1.0);
 					float z_range;
 
-					if (depth_z < directional_lights.data[i].shadow_split_offsets.x) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix1 * v);
+					if (depth_z < sdsm_directional_light(i).shadow_split_offsets.x) {
+						pssm_coord = (sdsm_directional_light(i).shadow_matrix1 * v);
 						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.x;
+						z_range = sdsm_directional_light(i).shadow_z_range.x;
 
-					} else if (depth_z < directional_lights.data[i].shadow_split_offsets.y) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix2 * v);
+					} else if (depth_z < sdsm_directional_light(i).shadow_split_offsets.y) {
+						pssm_coord = (sdsm_directional_light(i).shadow_matrix2 * v);
 						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.y;
+						z_range = sdsm_directional_light(i).shadow_z_range.y;
 
-					} else if (depth_z < directional_lights.data[i].shadow_split_offsets.z) {
-						pssm_coord = (directional_lights.data[i].shadow_matrix3 * v);
+					} else if (depth_z < sdsm_directional_light(i).shadow_split_offsets.z) {
+						pssm_coord = (sdsm_directional_light(i).shadow_matrix3 * v);
 						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.z;
+						z_range = sdsm_directional_light(i).shadow_z_range.z;
 
 					} else {
-						pssm_coord = (directional_lights.data[i].shadow_matrix4 * v);
+						pssm_coord = (sdsm_directional_light(i).shadow_matrix4 * v);
 						pssm_coord /= pssm_coord.w;
-						z_range = directional_lights.data[i].shadow_z_range.w;
+						z_range = sdsm_directional_light(i).shadow_z_range.w;
 					}
 
 					float depth = texture(sampler2D(directional_shadow_atlas, linear_sampler), pssm_coord.xy).r;
 					float shadow = exp(min(0.0, (pssm_coord.z - depth)) * z_range * INV_FOG_FADE);
 
-					shadow = mix(shadow, 1.0, smoothstep(directional_lights.data[i].fade_from, directional_lights.data[i].fade_to, view_pos.z)); //done with negative values for performance
+					shadow = mix(shadow, 1.0, smoothstep(sdsm_directional_light(i).fade_from, sdsm_directional_light(i).fade_to, view_pos.z)); //done with negative values for performance
 
-					shadow_attenuation = mix(vec3(1.0 - directional_lights.data[i].shadow_opacity), vec3(1.0), shadow);
+					shadow_attenuation = mix(vec3(1.0 - sdsm_directional_light(i).shadow_opacity), vec3(1.0), shadow);
 				}
 
-				total_light += shadow_attenuation * directional_lights.data[i].color * directional_lights.data[i].energy * henyey_greenstein(dot(safe_normalize(view_pos), safe_normalize(directional_lights.data[i].direction)), params.phase_g) * directional_lights.data[i].volumetric_fog_energy;
+				total_light += shadow_attenuation * sdsm_directional_light(i).color * sdsm_directional_light(i).energy * henyey_greenstein(dot(safe_normalize(view_pos), safe_normalize(sdsm_directional_light(i).direction)), params.phase_g) * sdsm_directional_light(i).volumetric_fog_energy;
 			}
 		}
 

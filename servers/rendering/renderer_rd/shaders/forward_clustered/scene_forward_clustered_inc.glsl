@@ -28,6 +28,8 @@ layout(push_constant, std430) uniform DrawCall {
 	uint uv_offset;
 	uint multimesh_motion_vectors_current_offset;
 	uint multimesh_motion_vectors_previous_offset;
+	uint sdsm_packet;
+	uint sdsm_cascade;
 #ifdef UBERSHADER
 	uint sc_packed_0;
 	uint sc_packed_1;
@@ -531,3 +533,5 @@ layout(set = 2, binding = 0, std430) restrict readonly buffer Transforms {
 transforms;
 
 /* Set 3 User Material */
+
+#include "../sdsm_scene_inc.glsl"

@@ -32,6 +32,9 @@
 
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/storage/utilities.h"
+
 #include <cfloat>
 
 using namespace RendererRD;
@@ -40,26 +43,38 @@ void SDSM::initialize() {
 	if (shader_version.is_valid()) {
 		return;
 	}
-	Vector<String> modes;
-	modes.push_back("\n#define REDUCE_DEPTH\n");
-	modes.push_back("\n");
-	modes.push_back("\n#define REDUCE_RECORDS\n");
-	modes.push_back("\n#define REDUCE_DEPTH\n#define MULTISAMPLE\n");
-	modes.push_back("\n#define MULTISAMPLE\n");
-	modes.push_back("\n#define MAKE_SPLITS\n");
-	modes.push_back("\n#define FIT_BOUNDS\n");
-	String precision;
+	RD *rd = RD::get_singleton();
+	String defines;
+	if ((rd->limit_get(RD::LIMIT_SUBGROUP_IN_SHADERS) & RD::SHADER_STAGE_COMPUTE_BIT) &&
+			(rd->limit_get(RD::LIMIT_SUBGROUP_OPERATIONS) & RD::SUBGROUP_ARITHMETIC_BIT)) {
+		defines += "\n#define USE_SUBGROUPS\n";
+		const uint32_t minimum_size = MAX(1u, uint32_t(rd->limit_get(RD::LIMIT_SUBGROUP_MIN_SIZE)));
+		defines += "#define SDSM_MAX_SUBGROUPS " + itos((WORKGROUP_SIZE + minimum_size - 1) / minimum_size) + "\n";
+	}
 #ifdef REAL_T_IS_DOUBLE
-	precision = "\n#define DOUBLE_WORLD\n";
+	defines += "\n#define DOUBLE_WORLD\n";
 #endif
-	modes.push_back("\n#define PATCH_SCENE\n" + precision);
-	modes.push_back("\n#define PATCH_LIGHT\n");
+	Vector<String> modes = {
+		"\n#define TILE_SUMMARY\n", "\n#define TILE_SUMMARY\n#define MULTISAMPLE\n",
+		"\n#define REDUCE_SCALARS\n", "\n#define CLASSIFY_TILES\n", "\n#define BUILD_RESCAN_ARGS\n",
+		"\n#define RESCAN_TILES\n", "\n#define RESCAN_TILES\n#define MULTISAMPLE\n",
+		"\n#define FULL_BOUNDS\n", "\n#define FULL_BOUNDS\n#define MULTISAMPLE\n",
+		"\n#define REDUCE_BOUNDS\n", "\n#define MAKE_SPLITS\n", "\n#define TRANSFORM_CASTERS\n",
+		"\n#define FIT_RECEIVERS\n", "\n#define FIT_CASTERS\n", "\n#define PUBLISH_LIGHT\n"
+	};
+	for (String &mode : modes) {
+		mode += defines;
+	}
 	shader.initialize(modes);
 	shader_version = shader.version_create();
 	for (int i = 0; i < MODE_MAX; i++) {
-		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
+		pipelines[i] = rd->compute_pipeline_create(shader.version_get_shader(shader_version, i));
 	}
-	depth_range = RD::get_singleton()->storage_buffer_create(sizeof(Reduction) * 4);
+	depth_range = rd->storage_buffer_create(sizeof(float) * 2);
+	rescan_counts = rd->storage_buffer_create(sizeof(uint32_t) * 4);
+	rescan_args = rd->storage_buffer_create(RendererSceneRender::MAX_RENDER_VIEWS * sizeof(uint32_t) * 6, {}, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	directional_results = rd->uniform_buffer_create(sizeof(Result) * RendererSceneRender::MAX_DIRECTIONAL_LIGHTS, {}, RD::BUFFER_CREATION_AS_STORAGE_BIT);
+	rd->buffer_clear(directional_results, 0, sizeof(Result) * RendererSceneRender::MAX_DIRECTIONAL_LIGHTS);
 }
 
 void SDSM::begin_frame() {
@@ -67,6 +82,7 @@ void SDSM::begin_frame() {
 		entry.value.active = false;
 	}
 	depth_views.clear();
+	depth_ready = false;
 }
 
 bool SDSM::has_light(RID p_light) const {
@@ -74,174 +90,177 @@ bool SDSM::has_light(RID p_light) const {
 	return state && state->active;
 }
 
+RID SDSM::get_result_buffer(RID p_light) const {
+	const LightState *state = lights.getptr(p_light);
+	return state && state->active ? state->result : RID();
+}
+
+RID SDSM::get_caster_buffer(RID p_light) const {
+	const LightState *state = lights.getptr(p_light);
+	return state && state->active ? state->inputs : RID();
+}
+
 void SDSM::free_light(RID p_light) {
 	LightState *state = lights.getptr(p_light);
 	if (!state) {
 		return;
 	}
-	RD *rd = RD::get_singleton();
-	rd->free_rid(state->data);
-	rd->free_rid(state->inputs);
-	rd->free_rid(state->result);
-	rd->free_rid(state->patch);
+	for (RID buffer : { state->data, state->inputs, state->caster_data, state->result, state->publish }) {
+		if (buffer.is_valid()) {
+			RD::get_singleton()->free_rid(buffer);
+		}
+	}
 	lights.erase(p_light);
 }
 
 SDSM::~SDSM() {
 	RD *rd = RD::get_singleton();
 	for (const KeyValue<RID, LightState> &entry : lights) {
-		rd->free_rid(entry.value.data);
-		rd->free_rid(entry.value.inputs);
-		rd->free_rid(entry.value.result);
-		rd->free_rid(entry.value.patch);
+		for (RID buffer : { entry.value.data, entry.value.inputs, entry.value.caster_data, entry.value.result, entry.value.publish }) {
+			if (buffer.is_valid()) {
+				rd->free_rid(buffer);
+			}
+		}
 	}
 	for (RID buffer : camera_buffers) {
 		rd->free_rid(buffer);
 	}
-	for (RID buffer : reduction_buffers) {
+	for (RID buffer : { summary_buffer, reduction_buffers[0], reduction_buffers[1], scalar_buffers[0], scalar_buffers[1],
+				 depth_range, rescan_tiles, rescan_counts, rescan_args, directional_results }) {
 		if (buffer.is_valid()) {
 			rd->free_rid(buffer);
 		}
-	}
-	if (depth_range.is_valid()) {
-		rd->free_rid(depth_range);
 	}
 	if (shader_version.is_valid()) {
 		shader.version_free(shader_version);
 	}
 }
 
-RID SDSM::reduce(const Vector<RID> &p_depth, const Vector<Projection> &p_inverse_projection, const Vector<Transform3D> &p_view_to_camera, const Size2i &p_size, const Rect2i &p_region, const RendererSDSM::Light *p_light) {
-	ERR_FAIL_COND_V(p_depth.size() != p_inverse_projection.size() || p_depth.size() != p_view_to_camera.size(), RID());
-	ERR_FAIL_COND_V(p_depth.is_empty() || p_size.x <= 0 || p_size.y <= 0, RID());
+void SDSM::ensure_buffers(uint32_t p_record_count, uint32_t p_scalar_count) {
 	RD *rd = RD::get_singleton();
-	UniformSetCacheRD *cache = UniformSetCacheRD::get_singleton();
-	MaterialStorage *materials = MaterialStorage::get_singleton();
-	initialize();
-	const uint32_t groups_x = (p_size.x + 7) / 8;
-	const uint32_t groups_y = (p_size.y + 7) / 8;
-	const uint32_t records_per_view = groups_x * groups_y;
-	const uint32_t record_count = records_per_view * p_depth.size();
-	if (record_count > buffer_capacity) {
-		for (RID &buffer : reduction_buffers) {
+	if (p_record_count > buffer_capacity) {
+		for (RID buffer : { summary_buffer, reduction_buffers[0], reduction_buffers[1], rescan_tiles }) {
 			if (buffer.is_valid()) {
 				rd->free_rid(buffer);
 			}
-			buffer = rd->storage_buffer_create(record_count * sizeof(Reduction) * 4);
 		}
-		buffer_capacity = record_count;
+		buffer_capacity = p_record_count;
+		summary_buffer = rd->storage_buffer_create(buffer_capacity * sizeof(Bounds));
+		reduction_buffers[0] = rd->storage_buffer_create(buffer_capacity * sizeof(Bounds) * 4);
+		reduction_buffers[1] = rd->storage_buffer_create(MAX(1u, (buffer_capacity + REDUCTION_FAN_IN - 1) / REDUCTION_FAN_IN) * sizeof(Bounds) * 4);
+		rescan_tiles = rd->storage_buffer_create(buffer_capacity * sizeof(uint32_t));
 	}
-	while (camera_buffers.size() < p_depth.size()) {
-		camera_buffers.push_back(rd->uniform_buffer_create(sizeof(CameraData)));
-	}
-	for (int view = 0; view < p_depth.size(); view++) {
-		CameraData data = {};
-		MaterialStorage::store_camera(p_inverse_projection[view], data.inverse_projection);
-		MaterialStorage::store_camera(Projection(p_view_to_camera[view]), data.view_to_camera);
-		if (p_light) {
-			MaterialStorage::store_camera(Projection(p_light->light_to_world.affine_inverse() * p_light->camera_transform * p_view_to_camera[view]), data.view_to_light);
+	if (p_scalar_count > scalar_capacity) {
+		for (RID buffer : scalar_buffers) {
+			if (buffer.is_valid()) {
+				rd->free_rid(buffer);
+			}
 		}
-		rd->buffer_update(camera_buffers[view], 0, sizeof(CameraData), &data);
+		scalar_capacity = p_scalar_count;
+		scalar_buffers[0] = rd->storage_buffer_create(scalar_capacity * sizeof(float) * 2);
+		scalar_buffers[1] = rd->storage_buffer_create(MAX(1u, (scalar_capacity + REDUCTION_FAN_IN - 1) / REDUCTION_FAN_IN) * sizeof(float) * 2);
 	}
-	RID sampler = materials->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
-	RD::Uniform output(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, Vector<RID>({ reduction_buffers[0] }));
-	PushConstant params = {};
-	params.size[0] = p_size.x;
-	params.size[1] = p_size.y;
-	params.groups_x = groups_x;
-	params.cascade_count = p_light ? p_light->cascade_count : 0;
-	const Rect2i region = p_region.has_area() ? p_region : Rect2i(Point2i(), p_size);
-	params.region_position[0] = region.position.x;
-	params.region_position[1] = region.position.y;
-	params.region_size[0] = region.size.x;
-	params.region_size[1] = region.size.y;
-	RD::ComputeListID list = rd->compute_list_begin();
-	for (int view = 0; view < p_depth.size(); view++) {
-		RD::TextureSamples samples = rd->texture_get_format(p_depth[view]).samples;
-		Mode mode = p_light ? BOUNDS : DEPTH;
-		if (samples != RD::TEXTURE_SAMPLES_1) {
-			mode = p_light ? BOUNDS_MSAA : DEPTH_MSAA;
-		}
-		params.sample_count = 1u << samples;
-		params.output_offset = view * records_per_view;
-		RID shader_rid = shader.version_get_shader(shader_version, mode);
-		RD::Uniform depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_depth[view] }));
-		RD::Uniform camera(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, Vector<RID>({ camera_buffers[view] }));
-		rd->compute_list_bind_compute_pipeline(list, pipelines[mode]);
-		rd->compute_list_bind_uniform_set(list, cache->get_cache(shader_rid, 0, output), 0);
-		if (p_light) {
-			LightState &state = lights[p_light->instance];
-			RD::Uniform data(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 2, Vector<RID>({ state.data }));
-			RD::Uniform result(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, Vector<RID>({ state.result }));
-			rd->compute_list_bind_uniform_set(list, cache->get_cache(shader_rid, 1, depth, camera, data, result), 1);
-		} else {
-			rd->compute_list_bind_uniform_set(list, cache->get_cache(shader_rid, 1, depth, camera), 1);
-		}
-		rd->compute_list_set_push_constant(list, &params, sizeof(params));
-		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
-	}
-	uint32_t count = record_count;
-	uint32_t source = 0;
-	RID reduction_shader = shader.version_get_shader(shader_version, REDUCE);
-	while (count > 1) {
-		rd->compute_list_add_barrier(list);
-		params.input_count = count;
-		uint32_t groups = (count + 63) / 64;
-		RD::Uniform input(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, Vector<RID>({ reduction_buffers[source] }));
-		RD::Uniform destination(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, Vector<RID>({ reduction_buffers[1 - source] }));
-		rd->compute_list_bind_compute_pipeline(list, pipelines[REDUCE]);
-		rd->compute_list_bind_uniform_set(list, cache->get_cache(reduction_shader, 0, destination), 0);
-		rd->compute_list_bind_uniform_set(list, cache->get_cache(reduction_shader, 1, input), 1);
-		params.groups_x = MIN(groups, uint32_t(rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X)));
-		rd->compute_list_set_push_constant(list, &params, sizeof(params));
-		rd->compute_list_dispatch(list, params.groups_x, (groups + params.groups_x - 1) / params.groups_x, 1);
-		count = groups;
-		source = 1 - source;
-	}
-	rd->compute_list_end();
-	return reduction_buffers[source];
 }
 
-void SDSM::dispatch(Mode p_mode, RID p_output, RID p_input, RID p_data, RID p_result, const PushConstant &p_params) {
+void SDSM::bind_stage(RD::ComputeListID p_list, Mode p_mode, RID p_output, std::initializer_list<RD::Uniform> p_inputs, const PushConstant &p_params) {
 	RD *rd = RD::get_singleton();
+	UniformSetCacheRD *cache = UniformSetCacheRD::get_singleton();
 	RID shader_rid = shader.version_get_shader(shader_version, p_mode);
-	RD::Uniform output(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, Vector<RID>({ p_output }));
-	RD::Uniform input(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, Vector<RID>({ p_input }));
-	RD::Uniform data(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 2, Vector<RID>({ p_data }));
-	RD::Uniform result(p_mode == PATCH_LIGHT ? RD::UNIFORM_TYPE_UNIFORM_BUFFER : RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, Vector<RID>({ p_result }));
-	RD::ComputeListID list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(list, pipelines[p_mode]);
-	rd->compute_list_bind_uniform_set(list, UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 0, output), 0);
-	if (p_mode == SPLITS || p_mode == PATCH_SCENE) {
-		rd->compute_list_bind_uniform_set(list, UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 1, input, data), 1);
-	} else {
-		rd->compute_list_bind_uniform_set(list, UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 1, input, data, result), 1);
+	RD::Uniform output(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_output);
+	const RD::Uniform *u = p_inputs.begin();
+	RID input_set;
+	// Stack-resident Uniforms keep this hot path allocation-free for buffers.
+	switch (p_inputs.size()) {
+		case 1:
+			input_set = cache->get_cache(shader_rid, 1, u[0]);
+			break;
+		case 2:
+			input_set = cache->get_cache(shader_rid, 1, u[0], u[1]);
+			break;
+		case 3:
+			input_set = cache->get_cache(shader_rid, 1, u[0], u[1], u[2]);
+			break;
+		case 4:
+			input_set = cache->get_cache(shader_rid, 1, u[0], u[1], u[2], u[3]);
+			break;
+		case 5:
+			input_set = cache->get_cache(shader_rid, 1, u[0], u[1], u[2], u[3], u[4]);
+			break;
+		case 6:
+			input_set = cache->get_cache(shader_rid, 1, u[0], u[1], u[2], u[3], u[4], u[5]);
+			break;
+		default:
+			ERR_FAIL_MSG("Invalid SDSM stage inputs.");
 	}
-	rd->compute_list_set_push_constant(list, &p_params, sizeof(p_params));
-	rd->compute_list_dispatch(list, 1, 1, 1);
-	rd->compute_list_end();
+	rd->compute_list_bind_compute_pipeline(p_list, pipelines[p_mode]);
+	rd->compute_list_bind_uniform_set(p_list, cache->get_cache(shader_rid, 0, output), 0);
+	rd->compute_list_bind_uniform_set(p_list, input_set, 1);
+	rd->compute_list_set_push_constant(p_list, &p_params, sizeof(p_params));
+}
+
+RID SDSM::reduce_scalar(RD::ComputeListID p_list, RID p_source, uint32_t p_count, PushConstant p_params, RID p_destination) {
+	RD *rd = RD::get_singleton();
+	bool final_write = p_destination.is_valid();
+	while (p_count > 1 || final_write) {
+		rd->compute_list_add_barrier(p_list);
+		const uint32_t groups = MAX(1u, (p_count + REDUCTION_FAN_IN - 1) / REDUCTION_FAN_IN);
+		RID destination = groups == 1 && p_destination.is_valid() ? p_destination : (p_source == scalar_buffers[0] ? scalar_buffers[1] : scalar_buffers[0]);
+		p_params.input_count = p_count;
+		p_params.groups_x = MIN(groups, uint32_t(rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X)));
+		bind_stage(p_list, SCALAR_REDUCE, destination, { RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_source) }, p_params);
+		rd->compute_list_dispatch(p_list, p_params.groups_x, (groups + p_params.groups_x - 1) / p_params.groups_x, 1);
+		p_count = groups;
+		p_source = destination;
+		if (groups == 1) {
+			break;
+		}
+	}
+	return p_source;
+}
+
+RID SDSM::reduce_bounds(RD::ComputeListID p_list, uint32_t p_count, PushConstant p_params) {
+	RD *rd = RD::get_singleton();
+	RID source = reduction_buffers[0];
+	while (p_count > 1) {
+		rd->compute_list_add_barrier(p_list);
+		const uint32_t groups = (p_count + REDUCTION_FAN_IN - 1) / REDUCTION_FAN_IN;
+		RID destination = source == reduction_buffers[0] ? reduction_buffers[1] : reduction_buffers[0];
+		p_params.input_count = p_count;
+		p_params.groups_x = MIN(groups, uint32_t(rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X)));
+		bind_stage(p_list, BOUNDS_REDUCE, destination, { RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, source) }, p_params);
+		rd->compute_list_dispatch(p_list, p_params.groups_x, (groups + p_params.groups_x - 1) / p_params.groups_x, 1);
+		p_count = groups;
+		source = destination;
+	}
+	return source;
 }
 
 void SDSM::reduce_depth(const Vector<RID> &p_depth, const Vector<Projection> &p_inverse_projection, const Vector<Transform3D> &p_view_to_camera, const Size2i &p_size, const Rect2i &p_region) {
+	ERR_FAIL_COND(p_depth.is_empty() || p_depth.size() > RendererSceneRender::MAX_RENDER_VIEWS);
+	ERR_FAIL_COND(p_depth.size() != p_inverse_projection.size() || p_depth.size() != p_view_to_camera.size());
+	ERR_FAIL_COND(p_size.x <= 0 || p_size.y <= 0);
 	begin_frame();
 	depth_views = p_depth;
 	inverse_projections = p_inverse_projection;
 	view_to_cameras = p_view_to_camera;
 	depth_size = p_size;
-	depth_region = p_region;
-	RID reduced = reduce(p_depth, p_inverse_projection, p_view_to_camera, p_size, p_region, nullptr);
-	ERR_FAIL_COND(reduced.is_null());
-	RD::get_singleton()->buffer_copy(reduced, depth_range, 0, 0, sizeof(Reduction) * 4);
+	depth_region = p_region.has_area() ? p_region.intersection(Rect2i(Point2i(), p_size)) : Rect2i(Point2i(), p_size);
+	// The first light's tile analysis also produces the shared depth extrema.
+	// Do not add a separate full-resolution depth traversal.
+	if (directional_results.is_valid()) {
+		RD::get_singleton()->buffer_clear(directional_results, 0, sizeof(Result) * RendererSceneRender::MAX_DIRECTIONAL_LIGHTS);
+	}
 }
 
 void SDSM::fit_light(const RendererSDSM::Light &p_light, const LocalVector<RendererSDSM::Caster> &p_casters, const Vector<AABB> &p_extra_receivers, const FitSettings &p_settings) {
 	ERR_FAIL_COND(depth_views.is_empty());
 	RD *rd = RD::get_singleton();
+	initialize();
 	LightState &state = lights[p_light.instance];
 	if (state.data.is_null()) {
 		state.data = rd->uniform_buffer_create(sizeof(LightData));
-		state.result = rd->storage_buffer_create(sizeof(Result));
-		state.patch = rd->uniform_buffer_create(sizeof(PatchData));
+		state.result = rd->uniform_buffer_create(sizeof(Result), {}, RD::BUFFER_CREATION_AS_STORAGE_BIT);
+		state.publish = rd->uniform_buffer_create(sizeof(PublishData));
 	}
 	const uint32_t input_count = MAX(1u, uint32_t(p_casters.size() + p_extra_receivers.size()));
 	if (state.capacity < input_count) {
@@ -249,7 +268,15 @@ void SDSM::fit_light(const RendererSDSM::Light &p_light, const LocalVector<Rende
 			rd->free_rid(state.inputs);
 		}
 		state.capacity = MAX(input_count, state.capacity * 2);
-		state.inputs = rd->storage_buffer_create(state.capacity * sizeof(InputBounds));
+		state.inputs = rd->storage_buffer_create(state.capacity * sizeof(Bounds));
+	}
+	const uint32_t caster_count = MAX(1u, uint32_t(p_casters.size()));
+	if (state.caster_capacity < caster_count) {
+		if (state.caster_data.is_valid()) {
+			rd->free_rid(state.caster_data);
+		}
+		state.caster_capacity = MAX(caster_count, state.caster_capacity * 2);
+		state.caster_data = rd->storage_buffer_create(state.caster_capacity * sizeof(CasterInput));
 	}
 	LightData data = {};
 	const Transform3D camera_to_light = p_light.light_to_world.affine_inverse() * p_light.camera_transform;
@@ -286,67 +313,177 @@ void SDSM::fit_light(const RendererSDSM::Light &p_light, const LocalVector<Rende
 	data.counts[0] = p_light.cascade_count;
 	data.counts[1] = p_casters.size();
 	data.counts[2] = p_extra_receivers.size();
-	inputs.resize(input_count);
+
+	caster_inputs.resize(p_casters.size());
+	for (uint32_t i = 0; i < p_casters.size(); i++) {
+		RenderGeometryInstance *instance = p_casters[i].instance;
+		Transform3D transform = instance->get_transform();
+		transform.origin -= p_light.camera_transform.origin;
+		CasterInput &caster = caster_inputs.write[i];
+		MaterialStorage::store_transform_transposed_3x4(transform, caster.transform);
+		const AABB bounds = instance->get_aabb();
+		for (int axis = 0; axis < 3; axis++) {
+			caster.local_bounds.minimum[axis] = bounds.position[axis];
+			caster.local_bounds.maximum[axis] = bounds.get_end()[axis];
+		}
+		caster.local_bounds.minimum[3] = caster.local_bounds.maximum[3] = 0;
+	}
+	if (!caster_inputs.is_empty()) {
+		rd->buffer_update(state.caster_data, 0, caster_inputs.size() * sizeof(CasterInput), caster_inputs.ptr());
+	}
+	inputs.resize(p_extra_receivers.size());
 	const Transform3D world_to_light = p_light.light_to_world.affine_inverse();
 	const Transform3D world_to_camera = p_light.camera_transform.affine_inverse();
-	for (uint32_t i = 0; i < input_count; i++) {
-		InputBounds bounds = {};
-		if (i < p_casters.size()) {
-			const AABB &aabb = p_casters[i].bounds;
-			for (int axis = 0; axis < 3; axis++) {
-				bounds.minimum[axis] = aabb.position[axis];
-				bounds.maximum[axis] = aabb.get_end()[axis];
-			}
-		} else if (i < p_casters.size() + p_extra_receivers.size()) {
-			const AABB &world = p_extra_receivers[i - p_casters.size()];
-			const AABB light = world_to_light.xform(world);
-			const AABB camera = world_to_camera.xform(world);
-			for (int axis = 0; axis < 3; axis++) {
-				bounds.minimum[axis] = light.position[axis];
-				bounds.maximum[axis] = light.get_end()[axis];
-			}
-			bounds.minimum[3] = -camera.get_end().z;
-			bounds.maximum[3] = -camera.position.z;
-			if (bounds.maximum[3] >= p_light.camera_near && bounds.minimum[3] <= p_light.shadow_far) {
-				data.extra_range[0] = MIN(data.extra_range[0], MAX(bounds.minimum[3], p_light.camera_near));
-				data.extra_range[1] = MAX(data.extra_range[1], MIN(bounds.maximum[3], p_light.shadow_far));
-			}
+	for (int i = 0; i < p_extra_receivers.size(); i++) {
+		const AABB &world = p_extra_receivers[i];
+		const AABB light_bounds = world_to_light.xform(world);
+		const AABB camera_bounds = world_to_camera.xform(world);
+		Bounds &bounds = inputs.write[i];
+		for (int axis = 0; axis < 3; axis++) {
+			bounds.minimum[axis] = light_bounds.position[axis];
+			bounds.maximum[axis] = light_bounds.get_end()[axis];
 		}
-		inputs.write[i] = bounds;
+		bounds.minimum[3] = -camera_bounds.get_end().z;
+		bounds.maximum[3] = -camera_bounds.position.z;
+		if (bounds.maximum[3] >= p_light.camera_near && bounds.minimum[3] <= p_light.shadow_far) {
+			data.extra_range[0] = MIN(data.extra_range[0], MAX(bounds.minimum[3], p_light.camera_near));
+			data.extra_range[1] = MAX(data.extra_range[1], MIN(bounds.maximum[3], p_light.shadow_far));
+		}
+	}
+	if (!inputs.is_empty()) {
+		rd->buffer_update(state.inputs, p_casters.size() * sizeof(Bounds), inputs.size() * sizeof(Bounds), inputs.ptr());
 	}
 	if (p_settings.fog_length > p_light.camera_near) {
 		data.extra_range[0] = MIN(data.extra_range[0], p_light.camera_near);
 		data.extra_range[1] = MAX(data.extra_range[1], MIN(p_settings.fog_length, p_light.shadow_far));
 	}
 	rd->buffer_update(state.data, 0, sizeof(data), &data);
-	rd->buffer_update(state.inputs, 0, input_count * sizeof(InputBounds), inputs.ptr());
+
+	const uint32_t groups_x = (depth_size.x + TILE_SIZE - 1) / TILE_SIZE;
+	const uint32_t groups_y = (depth_size.y + TILE_SIZE - 1) / TILE_SIZE;
+	const uint32_t records_per_view = groups_x * groups_y;
+	const uint32_t record_count = records_per_view * depth_views.size();
+	const uint32_t caster_groups = MAX(1u, (uint32_t(p_casters.size()) + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE);
+	ensure_buffers(record_count, MAX(record_count, caster_groups));
+	while (camera_buffers.size() < depth_views.size()) {
+		camera_buffers.push_back(rd->uniform_buffer_create(sizeof(CameraData)));
+	}
+	for (int view = 0; view < depth_views.size(); view++) {
+		CameraData camera = {};
+		const Projection clip_to_camera = Projection(view_to_cameras[view]) * inverse_projections[view];
+		MaterialStorage::store_camera(Projection(camera_to_light) * clip_to_camera, camera.clip_to_light);
+		for (int column = 0; column < 4; column++) {
+			camera.camera_depth_row[column] = clip_to_camera[column][2];
+		}
+		rd->buffer_update(camera_buffers[view], 0, sizeof(camera), &camera);
+	}
 	PushConstant params = {};
-	dispatch(SPLITS, state.result, depth_range, state.data, state.inputs, params);
-	RID bounds = reduce(depth_views, inverse_projections, view_to_cameras, depth_size, depth_region, &p_light);
-	ERR_FAIL_COND(bounds.is_null());
-	dispatch(FIT, state.result, bounds, state.data, state.inputs, params);
+	params.size[0] = depth_size.x;
+	params.size[1] = depth_size.y;
+	params.groups_x = groups_x;
+	params.input_count = record_count;
+	params.cascade_count = p_light.cascade_count;
+	params.region_position[0] = depth_region.position.x;
+	params.region_position[1] = depth_region.position.y;
+	params.region_size[0] = depth_region.size.x;
+	params.region_size[1] = depth_region.size.y;
+	params.records_per_view = records_per_view;
+	params.view_count = depth_views.size();
+	params.dispatch_limit = rd->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X);
+	const RD::Uniform light_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 2, state.data);
+	const RD::Uniform result_uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 3, state.result);
+	const RD::Uniform input_uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, state.inputs);
+	RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RENDER_TIMESTAMP("SDSM Tile Summaries");
+	RD::ComputeListID list = rd->compute_list_begin();
+	auto stage = [&](const char *p_name) {
+		if (RSG::utilities->capturing_timestamps) {
+			rd->compute_list_end();
+			RENDER_TIMESTAMP(p_name);
+			list = rd->compute_list_begin();
+		} else {
+			rd->compute_list_add_barrier(list);
+		}
+	};
+	for (int view = 0; view < depth_views.size(); view++) {
+		RD::Uniform &depth_uniform = depth_uniforms[view];
+		if (depth_uniform.get_id_count() != 2 || depth_uniform.get_id(1) != depth_views[view]) {
+			depth_uniform = RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, depth_views[view] }));
+		}
+		const RD::TextureSamples samples = rd->texture_get_format(depth_views[view]).samples;
+		params.sample_count = 1u << samples;
+		params.output_offset = view * records_per_view;
+		params.pad = depth_ready ? 0 : 1;
+		bind_stage(list, samples == RD::TEXTURE_SAMPLES_1 ? SUMMARY : SUMMARY_MSAA, summary_buffer, { depth_uniform, RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, camera_buffers[view]), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, scalar_buffers[0]) }, params);
+		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
+	}
+	stage("SDSM Splits");
+	if (!depth_ready) {
+		reduce_scalar(list, scalar_buffers[0], record_count, params, depth_range);
+		depth_ready = true;
+	}
+	rd->compute_list_add_barrier(list);
+	params.output_offset = 0;
+	bind_stage(list, SPLITS, state.result, { RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, depth_range), light_uniform }, params);
+	rd->compute_list_dispatch(list, 1, 1, 1);
+	// Clear only the tiny counters, outside the active compute list.
+	rd->compute_list_end();
+	rd->buffer_clear(rescan_counts, 0, sizeof(uint32_t) * 4);
+	RENDER_TIMESTAMP("SDSM Tile Classification");
+	list = rd->compute_list_begin();
+	params.input_count = record_count;
+	const uint32_t classify_groups = (record_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+	params.groups_x = MIN(classify_groups, params.dispatch_limit);
+	bind_stage(list, CLASSIFY, reduction_buffers[0], { RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, summary_buffer), light_uniform, result_uniform, RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, rescan_tiles), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, rescan_counts) }, params);
+	rd->compute_list_dispatch(list, params.groups_x, (classify_groups + params.groups_x - 1) / params.groups_x, 1);
+	rd->compute_list_add_barrier(list);
+	bind_stage(list, BUILD_RESCAN_ARGS, rescan_args, { RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, rescan_counts) }, params);
+	rd->compute_list_dispatch(list, 1, 1, 1);
+	stage("SDSM Boundary Rescan");
+	for (int view = 0; view < depth_views.size(); view++) {
+		const RD::TextureSamples samples = rd->texture_get_format(depth_views[view]).samples;
+		params.sample_count = 1u << samples;
+		params.output_offset = view * records_per_view;
+		for (int full = 0; full < 2; full++) {
+			params.groups_x = full ? groups_x : params.dispatch_limit;
+			const Mode mode = full ? (samples == RD::TEXTURE_SAMPLES_1 ? FULL_BOUNDS : FULL_BOUNDS_MSAA) : (samples == RD::TEXTURE_SAMPLES_1 ? RESCAN : RESCAN_MSAA);
+			const RD::Uniform &depth = depth_uniforms[view];
+			RD::Uniform camera(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, camera_buffers[view]);
+			if (full) {
+				bind_stage(list, mode, reduction_buffers[0], { depth, camera, light_uniform, result_uniform }, params);
+			} else {
+				bind_stage(list, mode, reduction_buffers[0], { depth, camera, light_uniform, result_uniform, RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, rescan_tiles), RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, rescan_counts) }, params);
+			}
+			rd->compute_list_dispatch_indirect(list, rescan_args, (view * 6 + full * 3) * sizeof(uint32_t));
+		}
+	}
+	stage("SDSM Receiver Reduction");
+	RID receiver_bounds = reduce_bounds(list, record_count, params);
+	stage("SDSM Caster Bounds");
+	params.input_count = p_casters.size();
+	params.groups_x = MIN(caster_groups, params.dispatch_limit);
+	bind_stage(list, CASTERS, state.inputs, { RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, state.caster_data), light_uniform, RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, scalar_buffers[0]) }, params);
+	rd->compute_list_dispatch(list, params.groups_x, (caster_groups + params.groups_x - 1) / params.groups_x, 1);
+	RID caster_range = reduce_scalar(list, scalar_buffers[0], caster_groups, params);
+	stage("SDSM Cascade Fit");
+	bind_stage(list, FIT_RECEIVERS, state.result, { RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, receiver_bounds), light_uniform, input_uniform, RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, caster_range) }, params);
+	rd->compute_list_dispatch(list, p_light.cascade_count, 1, 1);
+	rd->compute_list_add_barrier(list);
+	bind_stage(list, FIT_CASTERS, state.result, { light_uniform, input_uniform }, params);
+	rd->compute_list_dispatch(list, p_light.cascade_count, 1, 1);
+	rd->compute_list_end();
+	RENDER_TIMESTAMP("SDSM Fit Complete");
 	state.active = true;
 }
 
-void SDSM::patch_scene_data(RID p_light, uint32_t p_cascade, RID p_buffer, uint32_t p_byte_offset, bool p_flip_y, uint32_t p_view_count) {
+void SDSM::publish_directional_light(RID p_light, uint32_t p_index, const Rect2 *p_atlas_rects, float p_bias, float p_normal_bias, float p_transmittance_bias, float p_soft_shadow_scale, float p_fade_start) {
 	if (!has_light(p_light)) {
 		return;
 	}
+	ERR_FAIL_COND(p_index >= RendererSceneRender::MAX_DIRECTIONAL_LIGHTS);
 	LightState &state = lights[p_light];
-	PushConstant params = {};
-	params.output_offset = p_byte_offset / sizeof(float);
-	params.cascade_count = p_cascade;
-	params.sample_count = p_view_count;
-	params.pad = p_flip_y;
-	dispatch(PATCH_SCENE, p_buffer, state.result, state.data, state.inputs, params);
-}
-
-void SDSM::patch_directional_light(RID p_light, uint32_t p_index, RID p_buffer, const Rect2 *p_atlas_rects, float p_bias, float p_normal_bias, float p_transmittance_bias, float p_soft_shadow_scale, float p_fade_start) {
-	if (!has_light(p_light)) {
-		return;
-	}
-	LightState &state = lights[p_light];
-	PatchData data = {};
+	PublishData data = {};
 	for (int i = 0; i < 4; i++) {
 		data.atlas[i][0] = p_atlas_rects[i].position.x;
 		data.atlas[i][1] = p_atlas_rects[i].position.y;
@@ -358,8 +495,12 @@ void SDSM::patch_directional_light(RID p_light, uint32_t p_index, RID p_buffer, 
 	data.settings[2] = p_transmittance_bias / 100.0f;
 	data.settings[3] = p_soft_shadow_scale;
 	data.fade[0] = MIN(p_fade_start, 0.999f);
-	RD::get_singleton()->buffer_update(state.patch, 0, sizeof(data), &data);
+	RD *rd = RD::get_singleton();
+	rd->buffer_update(state.publish, 0, sizeof(data), &data);
 	PushConstant params = {};
-	params.output_offset = p_index * 116;
-	dispatch(PATCH_LIGHT, p_buffer, state.result, state.data, state.patch, params);
+	params.output_offset = p_index;
+	RD::ComputeListID list = rd->compute_list_begin();
+	bind_stage(list, PUBLISH_LIGHT, directional_results, { RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, state.result), RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 2, state.data), RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 3, state.publish) }, params);
+	rd->compute_list_dispatch(list, 1, 1, 1);
+	rd->compute_list_end();
 }

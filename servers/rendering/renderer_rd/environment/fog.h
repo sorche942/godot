@@ -193,6 +193,7 @@ private:
 		VolumetricFogProcessShaderRD process_shader;
 
 		RID process_shader_version;
+		RID default_sdsm_directional_buffer;
 		PipelineDeferredRD process_pipelines[VOLUMETRIC_FOG_PROCESS_SHADER_MAX];
 
 	} volumetric_fog;
@@ -361,6 +362,7 @@ public:
 		RID area_light_atlas;
 		RID directional_shadow_depth;
 		RID directional_light_buffer;
+		RID sdsm_directional_light_buffer;
 
 		// Objects related to our render buffer
 		Ref<VolumetricFog> vfog;
